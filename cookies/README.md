@@ -9,7 +9,7 @@ so ASCII-IDNA hosts use the same suffix boundaries.
 The snapshot was fetched from
 `https://publicsuffix.org/list/public_suffix_list.dat` and pinned at SHA-256
 `e81c6f5f11359a79a2479238e732e08bd8521071fd95ee47053471e3426d7b54`.
-Regenerate `builtin.gom` with `python3 ecosystem/request/tools/generate_psl.py`
+Regenerate `builtin.gom` with `python3 tools/generate_psl.py` from the request repository root.
 after updating the expected checksum. The list is licensed under MPL 2.0; see
 `LICENSE.MPL-2.0`.
 
