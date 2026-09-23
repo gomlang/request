@@ -1,0 +1,113 @@
+package main;
+
+use ecosystem::request::{Client, Headers, Url, RedirectPolicy};
+use ecosystem::request::cookies;
+use ecosystem::request::trace;
+use std::env;
+use std::json;
+use std::testing;
+use std::serde::{Serialize, Deserialize};
+
+#[derive(Serialize, Deserialize)]
+struct Message {
+    name: string,
+    count: isize,
+}
+
+fn field(value: json::Value, name: string) -> string {
+    testing::expect_some(
+        json::as_string(testing::expect_some(json::field(value, name), "field")),
+        "string",
+    )
+}
+
+pub fn exercise(base: string) -> () {
+    let request_trace = testing::expect_some(trace::Trace::new(128), "request trace");
+    let query_url = testing::expect_ok(Url::parse(base + "/echo?b=%2b&a=a+b&b=two"), "query URL");
+    testing::assert_eq(
+        testing::expect_ok(query_url.query(Vec::from_array([("b", "three")])), "shared codec").as_string(),
+        base + "/echo?a=a+b&b=%2B&b=two&b=three",
+    );
+    let headers = testing::expect_ok(
+        Headers::new().insert("x-custom", "external-consumer"),
+        "headers",
+    );
+    let client = testing::expect_ok(
+        Client::builder().default_headers(headers).redirect(RedirectPolicy::Limited(4)).trace(
+            request_trace,
+        ).build(),
+        "client",
+    );
+    defer client.close();
+    let address = testing::expect_ok(Url::parse(base), "URL");
+    let response = testing::expect_ok(
+        client.post(testing::expect_ok(address.join("/echo?old=1"), "join").as_string()).query(
+            Vec::from_array([("name", "中 +😀")]),
+        ).bearer_auth("consumer-token").form(
+            Vec::from_array([("key", "one two"), ("key", "three")]),
+        ).send(),
+        "form request",
+    );
+    let value: json::Value = testing::expect_ok(response.json(), "echo");
+    testing::assert_eq(field(value, "method"), "POST");
+    testing::assert_eq(field(value, "body"), "key=one+two&key=three");
+    testing::assert_eq(field(value, "query"), "name=%E4%B8%AD+%2B%F0%9F%98%80&old=1");
+    testing::assert_eq(field(value, "authorization"), "Bearer consumer-token");
+    testing::assert_eq(field(value, "custom"), "external-consumer");
+    let echoed: Message = testing::expect_ok(
+        testing::expect_ok(
+            client.post(base + "/json").json(Message { name: "外部 consumer", count: 41 }).send(),
+            "typed request",
+        ).json(),
+        "typed response",
+    );
+    testing::assert_eq(echoed.name, "外部 consumer");
+    testing::assert_eq(echoed.count, 41);
+    let redirected = testing::expect_ok(
+        client.get(base + "/redirect?to=/headers").send(),
+        "redirect",
+    );
+    testing::assert_eq(redirected.history().len(), 1);
+    testing::assert_eq(redirected.headers().get_all("x-many").len(), 2);
+    testing::assert_eq(testing::expect_ok(redirected.text(), "body"), "headers");
+    testing::assert(client.get(base + "/large").body_limit(2).send().is_err());
+    testing::assert_eq(
+        testing::expect_ok(client.get(base + "/chunked").send(), "chunked").content_length(),
+        18,
+    );
+    let events = request_trace.snapshot();
+    let mut starts = 0;
+    let mut redirects = 0;
+    let mut completed = 0;
+    for event in events {
+        match event.kind {
+            trace::EventKind::RequestStart => {
+                starts += 1;
+            },
+            trace::EventKind::Redirect => {
+                redirects += 1;
+            },
+            trace::EventKind::RequestDone => {
+                completed += 1;
+            },
+            _ => {},
+        }
+    }
+    testing::assert_eq(starts, 5);
+    testing::assert_eq(redirects, 1);
+    testing::assert_eq(completed, 4);
+    println("request consumer: HTTP interoperability ok");
+}
+
+fn main() -> () {
+    let jar = testing::expect_some(cookies::Jar::new(), "cookie jar");
+    let jar = jar.set("shop.example.co.uk", "/", "session=ok; Domain=example.co.uk", 10);
+    let jar = jar.set("shop.example.co.uk", "/", "unsafe=no; Domain=co.uk", 10);
+    testing::assert_eq(jar.header("api.example.co.uk", "/", true, 11).1, "session=ok");
+    let args = env::args();
+    if args.len() == 2 {
+        exercise(args[1])
+    } else {
+        local_http_interoperability();
+    }
+}
