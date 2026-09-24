@@ -1,0 +1,55 @@
+package tests;
+
+use consumer::request as app;
+use ecosystem::request::{Client, Url, Headers};
+use ecosystem::request::cookies;
+use std::testing;
+use std::bytes::{Bytes};
+
+#[test]
+fn dependency_interfaces_support_request_building() -> () {
+    let client = testing::expect_ok(Client::new(), "client");
+    defer client.close();
+    let bytes = Bytes::from_string("original");
+    let builder = client.post("https://example.invalid/path").body(bytes);
+    bytes.clear();
+    let request = testing::expect_ok(builder.build(), "build");
+    testing::assert_eq(request.body().len(), 8);
+    request.body().clear();
+    testing::assert_eq(request.body().len(), 8);
+    let frozen = request.frozen_body();
+    let copy = frozen.thaw();
+    copy.clear();
+    let forwarded = testing::expect_ok(
+        client.post("https://example.invalid").frozen_body(frozen).build(),
+        "frozen body",
+    );
+    testing::assert(forwarded.frozen_body() == frozen);
+    testing::assert_eq(forwarded.body().len(), 8);
+    let headers = testing::expect_ok(Headers::new().append("x-many", "one"), "header");
+    let headers = testing::expect_ok(headers.append("X-Many", "two"), "header");
+    let request = testing::expect_ok(
+        client.get("https://example.invalid").headers(headers).build(),
+        "headers",
+    );
+    testing::assert_eq(request.headers().get_all("x-many").len(), 2);
+    let url = testing::expect_ok(Url::parse("http://example.invalid:80/a"), "URL");
+    testing::assert_eq(url.origin(), "http://example.invalid:80");
+}
+
+#[test]
+fn real_http_interoperability() -> () {
+    app::local_http_interoperability();
+}
+
+#[test]
+fn public_cookie_jar_is_available_to_external_consumers() -> () {
+    let jar = testing::expect_some(cookies::Jar::new(), "jar");
+    let jar = jar.set("shop.example.com", "/account/page", "host=one", 100);
+    let jar = jar.set("shop.example.com", "/account/page", "shared=two; Domain=example.com", 100);
+    testing::assert_eq(jar.header("api.example.com", "/account/page", true, 101).1, "shared=two");
+    testing::assert_eq(
+        jar.header("shop.example.com", "/account/page", true, 101).1,
+        "host=one; shared=two",
+    );
+}
