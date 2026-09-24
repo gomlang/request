@@ -250,7 +250,7 @@ The RFC 7541 HPACK table constants were transcribed from Go's vendored
 From the repository root:
 
 ```sh
-just ecosystem-test request
+(cd ../verification && just ecosystem-test request)
 ```
 
 GoML library and consumer tests use local ephemeral HTTP/HTTPS servers and
