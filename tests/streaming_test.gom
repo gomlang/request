@@ -1,0 +1,601 @@
+package tests;
+
+use ecosystem::request::{Client, Error, ErrorKind, StreamingResponse, SseDecoder};
+use std::net;
+use std::task;
+use std::testing;
+use std::io;
+use io::{Read, Write};
+use std::context;
+use std::bytes::{Bytes};
+use std::time::{Duration};
+
+fn streaming_peer(server: (net::TcpStream) -> (), body: (string) -> ()) -> () {
+    let listener = testing::expect_ok(
+        net::TcpListener::bind(net::SocketAddr::new(net::IpAddr::V4([127, 0, 0, 1]), 0)),
+        "stream listener",
+    );
+    let address = testing::expect_ok(listener.local_addr(), "stream address");
+    task::scope(
+        |scope| {
+            defer {
+                let _ = listener.close();
+            };
+            let _ = scope.spawn(
+                |_| {
+                    let (socket, _) = testing::expect_ok(listener.accept(), "stream accept");
+                    defer {
+                        let _ = socket.close();
+                    };
+                    server(socket);
+                },
+            );
+            body("http://" + address.to_string());
+        },
+    );
+}
+
+fn streaming_line(socket: net::TcpStream) -> string {
+    let values: Vec[byte] = Vec::new();
+    let byte = Vec::from_array([0]);
+    loop {
+        testing::expect_ok(socket.read_exact(byte.as_mut_slice()), "stream peer line");
+        if byte[0] == 10 {
+            break
+        }
+        values.push(byte[0]);
+    }
+    testing::assert(values.pop() == Option::Some(13));
+    string_from_utf8(values).1
+}
+
+fn streaming_head(socket: net::TcpStream) -> string {
+    let mut result = "";
+    loop {
+        let line = streaming_line(socket);
+        if line == "" {
+            return result
+        }
+        result += line + "\n";
+        testing::assert(result.byte_len() < 16384);
+    }
+}
+
+fn streaming_text(response: StreamingResponse) -> Result[string, Error] {
+    let result = Bytes::new();
+    loop {
+        match response.chunk(3)? {
+            Some(chunk) => result.extend_from_slice(chunk.as_slice()),
+            None => return Result::Ok(string_from_utf8(result.to_vec()).1),
+        }
+    }
+}
+
+#[test]
+fn streaming_download_arrives_before_server_finishes() -> () {
+    let progress = Channel::new(1);
+    streaming_peer(
+        |socket| {
+            let headers = streaming_head(socket);
+            testing::assert(headers.contains("accept-encoding: identity"));
+            testing::expect_ok(
+                socket.write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n".as_slice(),
+                ),
+                "first response chunk",
+            );
+            let _ = progress.recv();
+            testing::expect_ok(
+                socket.write_all(b"5\r\nworld\r\n0\r\nX-Final: yes\r\n\r\n".as_slice()),
+                "last response chunk",
+            );
+        },
+        |url| {
+            let client = testing::expect_ok(
+                Client::builder().timeout(Duration::from_seconds(3)).build(),
+                "stream client",
+            );
+            defer client.close();
+            let response = client.get(url).send_stream(
+                |response| {
+                    testing::assert(response.content_length() == Option::None);
+                    let first = Bytes::new();
+                    while first.len() < 5 {
+                        let chunk = response.chunk(5 - first.len())?.ok_or(
+                            Error::new(ErrorKind::Transport, "first chunk absent"),
+                        )?;
+                        first.extend_from_slice(chunk.as_slice());
+                    }
+                    testing::assert_eq(string_from_utf8(first.to_vec()).1, "hello");
+                    progress.send(());
+                    let rest = streaming_text(response)?;
+                    testing::assert_eq(rest, "world");
+                    testing::assert(response.trailers().get("x-final") == Option::Some("yes"));
+                    Result::Ok(response)
+                },
+            );
+            let response = testing::expect_ok(response, "incremental download");
+            testing::assert_eq(
+                testing::expect_err(response.chunk(1), "response scope ended").kind,
+                ErrorKind::Closed,
+            );
+        },
+    );
+}
+
+struct StreamingUpload {
+    step: Ref[isize],
+    accepted: Channel[()],
+}
+
+impl Read for StreamingUpload {
+    fn read(self: StreamingUpload, buffer: MutSlice[byte]) -> Result[isize, io::Error] {
+        let step = self.step.get();
+        self.step.set(step + 1);
+        if step >= 2 {
+            return Result::Ok(0)
+        }
+        if step == 1 {
+            let _ = self.accepted.recv();
+        }
+        let bytes = if step == 0 {
+            b"first"
+        } else {
+            b"later"
+        };
+        for index in 0..5 {
+            buffer.set(index, bytes[index]);
+        }
+        Result::Ok(5)
+    }
+}
+
+#[test]
+fn streaming_upload_sends_before_reader_finishes() -> () {
+    let accepted = Channel::new(1);
+    streaming_peer(
+        |socket| {
+            let head = streaming_head(socket);
+            testing::assert(head.contains("Transfer-Encoding: chunked"));
+            testing::assert_eq(streaming_line(socket), "5");
+            testing::assert_eq(streaming_line(socket), "first");
+            accepted.send(());
+            testing::assert_eq(streaming_line(socket), "5");
+            testing::assert_eq(streaming_line(socket), "later");
+            testing::assert_eq(streaming_line(socket), "0");
+            testing::assert_eq(streaming_line(socket), "");
+            testing::expect_ok(
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".as_slice()),
+                "upload reply",
+            );
+        },
+        |url| {
+            let client = testing::expect_ok(
+                Client::builder().timeout(Duration::from_seconds(3)).build(),
+                "upload client",
+            );
+            defer client.close();
+            let reader = StreamingUpload { step: Ref::new(0), accepted };
+            let reply = testing::expect_ok(
+                client.post(url).send_reader(reader, Option::None, streaming_text),
+                "incremental upload",
+            );
+            testing::assert_eq(reply, "ok");
+        },
+    );
+}
+
+#[test]
+fn streaming_fixed_upload_and_response_copy() -> () {
+    streaming_peer(
+        |socket| {
+            testing::assert(streaming_head(socket).contains("Content-Length: 4"));
+            let input = Vec::from_array([0, 0, 0, 0]);
+            testing::expect_ok(socket.read_exact(input.as_mut_slice()), "fixed upload");
+            testing::assert_eq(string_from_utf8(input).1, "body");
+            testing::expect_ok(
+                socket.write_all(b"HTTP/1.0 200 OK\r\n\r\nresponse".as_slice()),
+                "EOF response",
+            );
+        },
+        |url| {
+            let client = testing::expect_ok(Client::new(), "fixed client");
+            defer client.close();
+            let output = io::Cursor::new(Bytes::new());
+            let count = testing::expect_ok(
+                client.put(url).send_reader(
+                    io::StringReader::new("bodytail"),
+                    Option::Some(4),
+                    |response| response.copy_to(output),
+                ),
+                "fixed upload response",
+            );
+            testing::assert_eq(count, 8);
+            testing::assert_eq(string_from_utf8(output.bytes().to_vec()).1, "response");
+        },
+    );
+}
+
+#[test]
+fn streaming_limits_and_malformed_framing_are_errors() -> () {
+    for wire in[
+        "HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\n123456789",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n9\r\n123456789\r\n0\r\n\r\n",
+        "HTTP/1.0 200 OK\r\n\r\n123456789",
+    ] {
+        wire_response(
+            wire,
+            |url| {
+                let client = testing::expect_ok(Client::new(), "limited stream client");
+                defer client.close();
+                testing::assert_eq(
+                    testing::expect_err(
+                        client.get(url).body_limit(8).send_stream(streaming_text),
+                        "stream body limit",
+                    ).kind,
+                    ErrorKind::BodyLimit,
+                );
+            },
+        );
+    }
+    for wire in[
+        "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nx",
+        "HTTP/1.1 200 OK\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nz\r\n",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nxXX",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nContent-Length: 1\r\n\r\n",
+    ] {
+        wire_response(
+            wire,
+            |url| {
+                let client = testing::expect_ok(Client::new(), "malformed stream client");
+                defer client.close();
+                testing::assert_eq(
+                    testing::expect_err(
+                        client.get(url).send_stream(streaming_text),
+                        "stream framing",
+                    ).kind,
+                    ErrorKind::Transport,
+                );
+            },
+        );
+    }
+}
+
+#[test]
+fn streaming_early_return_releases_connection_and_cancellation_survives_scope() -> () {
+    streaming_peer(
+        |socket| {
+            let _ = streaming_head(socket);
+            testing::expect_ok(
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nx".as_slice()),
+                "early response",
+            );
+            let input = Vec::from_array([0]);
+            testing::assert_eq(
+                testing::expect_ok(socket.read(input.as_mut_slice()), "client closes early"),
+                0,
+            );
+        },
+        |url| {
+            let client = testing::expect_ok(Client::new(), "early client");
+            defer client.close();
+            testing::expect_ok(
+                client.get(url).send_stream(
+                    |response| {
+                        let _ = response.chunk(1)?;
+                        Result::Ok(())
+                    },
+                ),
+                "early return",
+            );
+        },
+    );
+    wire_response(
+        "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nx",
+        |url| {
+            let client = testing::expect_ok(Client::new(), "cancel client");
+            defer client.close();
+            context::with_cancel(
+                context::Context::background(),
+                |control, cancel| {
+                    let result = client.get(url).send_stream_with(
+                        control,
+                        |response| {
+                            cancel.cancel();
+                            streaming_text(response)
+                        },
+                    );
+                    testing::assert_eq(
+                        testing::expect_err(result, "cancel streaming read").kind,
+                        ErrorKind::Cancelled,
+                    );
+                },
+            );
+        },
+    );
+}
+
+#[test]
+fn streaming_sse_delivers_before_connection_finishes() -> () {
+    let next = Channel::new(1);
+    streaming_peer(
+        |socket| {
+            let _ = streaming_head(socket);
+            testing::expect_ok(
+                socket.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: first\n\n".as_slice(),
+                ),
+                "first SSE",
+            );
+            let _ = next.recv();
+            testing::expect_ok(socket.write_all(b"data: next\n\n".as_slice()), "second SSE");
+        },
+        |url| {
+            let client = testing::expect_ok(
+                Client::builder().timeout(Duration::from_seconds(3)).build(),
+                "SSE client",
+            );
+            defer client.close();
+            testing::expect_ok(
+                client.get(url).send_stream(
+                    |response| {
+                        let decoder = response.sse()?;
+                        let first = decoder.next()?.ok_or(
+                            Error::new(ErrorKind::Decode, "missing first SSE"),
+                        )?;
+                        testing::assert_eq(first.data, "first");
+                        next.send(());
+                        let second = decoder.next()?.ok_or(
+                            Error::new(ErrorKind::Decode, "missing second SSE"),
+                        )?;
+                        testing::assert_eq(second.data, "next");
+                        testing::assert(decoder.next()?.is_none());
+                        Result::Ok(())
+                    },
+                ),
+                "incremental SSE",
+            );
+        },
+    );
+}
+
+#[test]
+fn streaming_sse_fields_line_endings_and_limits() -> () {
+    let decoder = testing::expect_ok(
+        SseDecoder::new(
+            io::StringReader::new(
+                "﻿: comment\r\nid: 7\revent: update\rdata: one\r\ndata: two\rretry: 1500\r\rdata\n\nid:\n\ndata: final\n\nid: lost\ndata: incomplete",
+            ),
+        ),
+        "SSE decoder",
+    );
+    let first = testing::expect_some(
+        testing::expect_ok(decoder.next(), "first SSE event"),
+        "first event",
+    );
+    testing::assert_eq(first.data, "one\ntwo");
+    testing::assert_eq(first.event, "update");
+    testing::assert_eq(first.id, "7");
+    testing::assert(first.retry_millis == Option::Some(1500));
+    let second = testing::expect_some(
+        testing::expect_ok(decoder.next(), "empty data event"),
+        "empty data",
+    );
+    testing::assert_eq(second.data, "");
+    testing::assert_eq(second.event, "message");
+    testing::assert_eq(second.id, "7");
+    let third = testing::expect_some(
+        testing::expect_ok(decoder.next(), "final SSE event"),
+        "final event",
+    );
+    testing::assert_eq(third.id, "");
+    testing::assert_eq(third.data, "final");
+    testing::assert(testing::expect_ok(decoder.next(), "discard partial event").is_none());
+    testing::assert_eq(decoder.last_event_id(), "");
+    testing::assert(decoder.retry_millis() == Option::Some(1500));
+    let limited = testing::expect_ok(
+        SseDecoder::with_limits(io::StringReader::new("data: long\n\n"), 4, 10),
+        "limited SSE",
+    );
+    testing::assert_eq(
+        testing::expect_err(limited.next(), "SSE line limit").kind,
+        ErrorKind::Decode,
+    );
+    testing::assert(limited.next().is_err());
+    let event_limit = testing::expect_ok(
+        SseDecoder::with_limits(io::StringReader::new("data: a\ndata: b\n\n"), 16, 10),
+        "event limit",
+    );
+    testing::assert(event_limit.next().is_err());
+}
+
+struct SseFragmentReader {
+    bytes: Vec[byte],
+    offset: Ref[isize],
+}
+
+impl Read for SseFragmentReader {
+    fn read(self: SseFragmentReader, buffer: MutSlice[byte]) -> Result[isize, io::Error] {
+        if buffer.len() == 0 || self.offset.get() == self.bytes.len() {
+            return Result::Ok(0)
+        }
+        buffer.set(0, self.bytes[self.offset.get()]);
+        self.offset.set(self.offset.get() + 1);
+        Result::Ok(1)
+    }
+}
+
+#[test]
+fn streaming_sse_fragmented_utf8_and_ignored_fields() -> () {
+    let bytes = "id: keep\n\nretry: 12\nretry: 2x\nid: bad".to_bytes();
+    bytes.push(0);
+    for byte in "value\ndata: ".to_bytes() {
+        bytes.push(byte);
+    }
+    bytes.push(255);
+    for byte in "\n\n".to_bytes() {
+        bytes.push(byte);
+    }
+    let decoder = testing::expect_ok(
+        SseDecoder::new(SseFragmentReader { bytes, offset: Ref::new(0) }),
+        "fragmented SSE",
+    );
+    let event = testing::expect_some(
+        testing::expect_ok(decoder.next(), "fragmented SSE event"),
+        "fragmented event",
+    );
+    testing::assert_eq(event.id, "keep");
+    testing::assert_eq(event.data, "�");
+    testing::assert(event.retry_millis == Option::Some(12));
+    testing::assert(testing::expect_ok(decoder.next(), "fragmented EOF").is_none());
+    let exact = testing::expect_ok(
+        SseDecoder::with_limits(io::StringReader::new("data: x\n\n"), 7, 8),
+        "exact SSE limits",
+    );
+    testing::assert(testing::expect_ok(exact.next(), "exact event budget").is_some());
+    let end_retry = testing::expect_ok(
+        SseDecoder::new(io::StringReader::new("retry: 250")),
+        "SSE retry at EOF",
+    );
+    testing::assert(testing::expect_ok(end_retry.next(), "EOF without event").is_none());
+    testing::assert(end_retry.retry_millis() == Option::Some(250));
+}
+
+#[test]
+fn streaming_tls_and_proxy_use_http1_and_preserve_cookies() -> () {
+    let server = start(true, false);
+    defer close(server);
+    let proxy = start_proxy(false);
+    defer close(proxy);
+    for proxied in[false, true] {
+        let builder = Client::builder().add_root_certificate(certificate(server)).cookie_store(true);
+        let builder = if proxied {
+            builder.proxy(url(proxy))
+        } else {
+            builder
+        };
+        let client = testing::expect_ok(builder.build(), "stream TLS client");
+        defer client.close();
+        let result = testing::expect_ok(
+            client.get(url(server) + "/headers").send_stream(
+                |response| {
+                    testing::assert_eq(response.version(), "HTTP/1.1");
+                    streaming_text(response)
+                },
+            ),
+            "TLS streaming",
+        );
+        testing::assert_eq(result, "headers");
+        let _ = testing::expect_ok(
+            client.get(url(server) + "/cookie/set").send_stream(streaming_text),
+            "stream cookies set",
+        );
+        testing::assert(
+            testing::expect_ok(
+                client.get(url(server) + "/cookie/get").send_stream(streaming_text),
+                "stream cookies get",
+            ).contains("session="),
+        );
+    }
+}
+
+#[test]
+fn streaming_upload_limits_short_read_and_replay_are_errors() -> () {
+    for limited in[false, true] {
+        streaming_peer(
+            |socket| {
+                let _ = streaming_head(socket);
+                let bytes = Vec::from_array([0, 0, 0, 0]);
+                loop {
+                    match socket.read(bytes.as_mut_slice()) {
+                        Ok(0) | Err(_) => break,
+                        _ => (),
+                    }
+                }
+            },
+            |url| {
+                let client = testing::expect_ok(
+                    Client::builder().request_body_limit(
+                        if limited {
+                            3
+                        } else {
+                            16
+                        },
+                    ).build(),
+                    "stream upload limit client",
+                );
+                defer client.close();
+                let error = testing::expect_err(
+                    client.post(url).send_reader(
+                        io::StringReader::new("four"),
+                        if limited {
+                            Option::None
+                        } else {
+                            Option::Some(8)
+                        },
+                        streaming_text,
+                    ),
+                    "upload failure",
+                );
+                testing::assert_eq(
+                    error.kind,
+                    if limited {
+                        ErrorKind::BodyLimit
+                    } else {
+                        ErrorKind::Transport
+                    },
+                );
+            },
+        );
+    }
+    let server = start(false, false);
+    defer close(server);
+    let client = testing::expect_ok(Client::new(), "stream redirect client");
+    defer client.close();
+    let error = testing::expect_err(
+        client.post(url(server) + "/redirect?code=307&to=/headers").send_reader(
+            io::StringReader::new("body"),
+            Option::Some(4),
+            streaming_text,
+        ),
+        "upload replay rejection",
+    );
+    testing::assert_eq(error.kind, ErrorKind::Redirect);
+    testing::assert_eq(
+        testing::expect_ok(
+            client.post(url(server) + "/redirect?code=303&to=/headers").send_reader(
+                io::StringReader::new("body"),
+                Option::Some(4),
+                streaming_text,
+            ),
+            "upload redirect to GET",
+        ),
+        "headers",
+    );
+}
+
+#[test]
+fn streaming_body_timeout_and_client_close_are_recoverable() -> () {
+    let server = start(false, false);
+    defer close(server);
+    let client = testing::expect_ok(Client::new(), "stream timeout client");
+    defer client.close();
+    let error = testing::expect_err(
+        client.get(url(server) + "/slowbody").timeout(Duration::from_milliseconds(100)).send_stream(
+            streaming_text,
+        ),
+        "stream body timeout",
+    );
+    testing::assert_eq(error.kind, ErrorKind::Timeout);
+    let error = testing::expect_err(
+        client.get(url(server) + "/headers").send_stream(
+            |response| {
+                client.close();
+                streaming_text(response)
+            },
+        ),
+        "client closes active stream",
+    );
+    testing::assert_eq(error.kind, ErrorKind::Closed);
+}

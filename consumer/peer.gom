@@ -116,6 +116,7 @@ pub fn local_http_interoperability() -> () {
                 },
             );
             exercise("http://" + address.to_string());
+            streaming_exercise("http://" + address.to_string());
         },
     );
 }

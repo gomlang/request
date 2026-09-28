@@ -1,0 +1,60 @@
+package main;
+
+use ecosystem::request::{Client, Error, StreamingResponse, SseDecoder};
+use std::io;
+use std::bytes::{Bytes};
+use std::testing;
+
+fn consume_stream(response: StreamingResponse) -> Result[string, Error] {
+    let bytes = Bytes::new();
+    loop {
+        match response.chunk(7)? {
+            Some(chunk) => bytes.extend_from_slice(chunk.as_slice()),
+            None => return Result::Ok(string_from_utf8(bytes.to_vec()).1),
+        }
+    }
+}
+
+pub fn streaming_exercise(base: string) -> () {
+    let client = testing::expect_ok(Client::new(), "consumer stream client");
+    defer client.close();
+    testing::assert_eq(
+        testing::expect_ok(
+            client.get(base + "/chunked").send_stream(consume_stream),
+            "consumer streaming response",
+        ),
+        "chunk-onechunk-two",
+    );
+    testing::assert_eq(
+        testing::expect_ok(
+            client.post(base + "/json").send_reader(
+                io::StringReader::new("stream-upload"),
+                Option::Some(13),
+                consume_stream,
+            ),
+            "consumer streaming upload",
+        ),
+        "stream-upload",
+    );
+    let redirected = testing::expect_ok(
+        client.get(base + "/redirect").send_stream(
+            |response| {
+                testing::assert_eq(response.history().len(), 1);
+                consume_stream(response)
+            },
+        ),
+        "consumer stream redirect",
+    );
+    testing::assert_eq(redirected, "headers");
+    let decoder = testing::expect_ok(
+        SseDecoder::new(io::StringReader::new("id: consumer\ndata: event\n\n")),
+        "consumer SSE",
+    );
+    let event = testing::expect_some(
+        testing::expect_ok(decoder.next(), "consumer SSE next"),
+        "consumer event",
+    );
+    testing::assert_eq(event.id, "consumer");
+    testing::assert_eq(event.data, "event");
+    testing::assert_eq(decoder.last_event_id(), "consumer");
+}
