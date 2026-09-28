@@ -1,0 +1,977 @@
+package request;
+
+use ecosystem::request::trace;
+use std::bytes::{Bytes};
+use std::context;
+use std::io;
+use io::{Read, Write};
+use std::task;
+
+enum StreamingFraming {
+    Empty,
+    Length(isize),
+    Chunked,
+    UntilClose,
+}
+
+struct StreamingState {
+    framing: StreamingFraming,
+    remaining: isize,
+    terminator: bool,
+    total: isize,
+    done: bool,
+    trailers: Headers,
+    failure: Option[Error],
+}
+
+pub struct StreamingResponse {
+    status_value: StatusCode,
+    headers_value: Headers,
+    url_value: Url,
+    version_value: string,
+    history_value: Vec[Url],
+    reader: Reader,
+    state: Channel[StreamingState],
+    closed: Channel[()],
+    close_gate: Channel[()],
+    limit: isize,
+    header_budget: Vec[i64],
+}
+
+fn streaming_closed(response: StreamingResponse) -> bool {
+    select {
+        recv(response.closed) as _ => true,
+        default => false,
+    }
+}
+
+fn streaming_io_error(error: Error) -> io::Error {
+    io::Error::new(
+        match error.kind {
+            ErrorKind::Timeout => io::ErrorKind::TimedOut,
+            ErrorKind::Cancelled => io::ErrorKind::Interrupted,
+            ErrorKind::Closed => io::ErrorKind::BrokenPipe,
+            _ => io::ErrorKind::InvalidData,
+        },
+        "HTTP response read",
+        Option::None,
+        Option::None,
+        error.message,
+    )
+}
+
+fn streaming_read_available(reader: Reader, buffer: MutSlice[byte]) -> Result[isize, Error] {
+    if buffer.len() == 0 {
+        return Result::Ok(0)
+    }
+    let buffered = reader.positions[1] - reader.positions[0];
+    if buffered == 0 {
+        return reader.stream.read(buffer, reader.context)
+    }
+    let count = if buffered < buffer.len() {
+        buffered
+    } else {
+        buffer.len()
+    };
+    for index in 0..count {
+        buffer.set(index, reader.buffer[reader.positions[0] + index]);
+    }
+    reader.positions[0] += count;
+    Result::Ok(count)
+}
+
+fn streaming_chunk_size(reader: Reader) -> Result[isize, Error] {
+    let line = reader.line(Vec::from_array([8192]))?;
+    let size = line.split_once(";").map(|part| part.0).unwrap_or(line);
+    if size == "" {
+        return Result::Err(transport_error("invalid HTTP chunk size"))
+    }
+    let mut count = 0;
+    for byte in size.to_bytes() {
+        let digit = hex_digit(byte);
+        if digit < 0 || count > (9223372036854775807 - digit) / 16 {
+            return Result::Err(transport_error("invalid HTTP chunk size"))
+        }
+        count = count * 16 + digit;
+    }
+    Result::Ok(count)
+}
+
+fn streaming_read_locked(
+    response: StreamingResponse,
+    state: Ref[StreamingState],
+    buffer: MutSlice[byte],
+) -> Result[isize, Error] {
+    let mut value = state.get();
+    if let Some(error) = value.failure {
+        return Result::Err(error)
+    }
+    if value.done || buffer.len() == 0 {
+        return Result::Ok(0)
+    }
+    response.reader.context.check().map_err(context_error)?;
+    match value.framing {
+        StreamingFraming::Empty => {
+            value = StreamingState { done: true, ..value };
+        },
+        StreamingFraming::Chunked => {
+            if value.remaining == 0 {
+                if value.terminator && response.reader.exact(2)?.to_vec() != b"\r\n" {
+                    return Result::Err(transport_error("invalid HTTP chunk terminator"))
+                }
+                let count = streaming_chunk_size(response.reader)?;
+                if count > response.limit - value.total {
+                    return Result::Err(body_limit_error())
+                }
+                value = StreamingState { remaining: count, terminator: true, ..value };
+                if count == 0 {
+                    let trailers = read_headers(response.reader, response.header_budget)?;
+                    if trailers.contains("content-length") || trailers.contains("transfer-encoding")
+                        || trailers.contains("host") {
+                        return Result::Err(transport_error("forbidden HTTP framing trailer"))
+                    }
+                    value = StreamingState { done: true, trailers, ..value };
+                }
+            }
+        },
+        _ => (),
+    }
+    if value.done {
+        state.set(value);
+        return Result::Ok(0)
+    }
+    let mut available = buffer.len();
+    match value.framing {
+        StreamingFraming::Length(_) | StreamingFraming::Chunked => {
+            if value.remaining < available {
+                available = value.remaining;
+            }
+        },
+        _ => {
+            if response.limit - value.total < available {
+                available = response.limit - value.total;
+            }
+        },
+    }
+    if available == 0 {
+        match response.reader.byte()? {
+            None => {
+                state.set(StreamingState { done: true, ..value });
+                return Result::Ok(0)
+            },
+            Some(_) => return Result::Err(body_limit_error()),
+        }
+    }
+    let count = streaming_read_available(response.reader, buffer.sub(0, available))?;
+    if count < 0 || count > available {
+        return Result::Err(transport_error("invalid HTTP transport read count"))
+    }
+    if count == 0 {
+        match value.framing {
+            StreamingFraming::UntilClose => {
+                state.set(StreamingState { done: true, ..value });
+                return Result::Ok(0)
+            },
+            _ => return Result::Err(transport_error("unexpected end of HTTP body")),
+        }
+    }
+    value = StreamingState { total: value.total + count, ..value };
+    match value.framing {
+        StreamingFraming::Length(_) => {
+            value = StreamingState {
+                remaining: value.remaining - count,
+                done: value.remaining == count,
+                ..value,
+            };
+        },
+        StreamingFraming::Chunked => {
+            value = StreamingState { remaining: value.remaining - count, ..value };
+        },
+        _ => (),
+    }
+    state.set(value);
+    Result::Ok(count)
+}
+
+impl StreamingResponse {
+    pub fn status(self: StreamingResponse) -> StatusCode {
+        self.status_value
+    }
+
+    pub fn headers(self: StreamingResponse) -> Headers {
+        self.headers_value
+    }
+
+    pub fn url(self: StreamingResponse) -> Url {
+        self.url_value
+    }
+
+    pub fn version(self: StreamingResponse) -> string {
+        self.version_value
+    }
+
+    pub fn history(self: StreamingResponse) -> Vec[Url] {
+        self.history_value.copy()
+    }
+
+    pub fn content_length(self: StreamingResponse) -> Option[isize] {
+        let state = self.state.recv().unwrap_or(
+            StreamingState {
+                framing: StreamingFraming::Empty,
+                remaining: 0,
+                terminator: false,
+                total: 0,
+                done: true,
+                trailers: Headers::new(),
+                failure: Option::None,
+            },
+        );
+        let result = match state.framing {
+            StreamingFraming::Length(count) => Option::Some(count),
+            StreamingFraming::Empty => Option::Some(0),
+            _ => Option::None,
+        };
+        self.state.send(state);
+        result
+    }
+
+    pub fn trailers(self: StreamingResponse) -> Headers {
+        let state = self.state.recv().unwrap_or(
+            StreamingState {
+                framing: StreamingFraming::Empty,
+                remaining: 0,
+                terminator: false,
+                total: 0,
+                done: true,
+                trailers: Headers::new(),
+                failure: Option::None,
+            },
+        );
+        let result = state.trailers;
+        self.state.send(state);
+        result
+    }
+
+    fn failure(self: StreamingResponse) -> Option[Error] {
+        let state = self.state.recv().ok_or(
+            Error::new(ErrorKind::Closed, "streaming response is closed"),
+        );
+        match state {
+            Ok(value) => {
+                let error = value.failure;
+                self.state.send(value);
+                error
+            },
+            Err(error) => Option::Some(error),
+        }
+    }
+
+    pub fn close(self: StreamingResponse) -> () {
+        let _ = self.close_gate.recv();
+        defer self.close_gate.send(());
+        if !streaming_closed(self) {
+            self.closed.close();
+            self.reader.stream.close();
+        }
+    }
+
+    pub fn read_bytes(self: StreamingResponse, buffer: MutSlice[byte]) -> Result[isize, Error] {
+        if streaming_closed(self) {
+            return Result::Err(Error::new(ErrorKind::Closed, "streaming response is closed"))
+        }
+        let value = self.state.recv().ok_or(
+            Error::new(ErrorKind::Closed, "streaming response is closed"),
+        )?;
+        let state = Ref::new(value);
+        let result = streaming_read_locked(self, state, buffer);
+        if let Err(error) = result {
+            state.set(StreamingState { failure: Option::Some(error), ..state.get() });
+        }
+        self.state.send(state.get());
+        result
+    }
+
+    pub fn chunk(self: StreamingResponse, max_bytes: isize) -> Result[Option[Bytes], Error] {
+        if max_bytes < 1 || max_bytes > 1048576 {
+            return Result::Err(
+                Error::new(ErrorKind::Builder, "stream chunk size must be within 1..1048576"),
+            )
+        }
+        let buffer: Vec[byte] = Vec::with_capacity(max_bytes);
+        for _ in 0..max_bytes {
+            buffer.push(0);
+        }
+        let count = self.read_bytes(buffer.as_mut_slice())?;
+        if count == 0 {
+            Result::Ok(Option::None)
+        } else {
+            buffer.truncate(count);
+            Result::Ok(Option::Some(Bytes::from_vec(buffer)))
+        }
+    }
+
+    pub fn copy_to[W: Write](self: StreamingResponse, writer: W) -> Result[u64, Error] {
+        let buffer: Vec[byte] = Vec::with_capacity(8192);
+        for _ in 0..8192 {
+            buffer.push(0);
+        }
+        let mut total: u64 = 0;
+        loop {
+            let count = self.read_bytes(buffer.as_mut_slice())?;
+            if count == 0 {
+                return Result::Ok(total)
+            }
+            writer.write_all(buffer.as_slice().sub(0, count)).map_err(io_error)?;
+            total += count.to_u64();
+        }
+    }
+
+    pub fn error_for_status(self: StreamingResponse) -> Result[StreamingResponse, Error] {
+        if self.status_value.is_client_error() || self.status_value.is_server_error() {
+            Result::Err(
+                Error {
+                    kind: ErrorKind::Status,
+                    message: "HTTP status " + self.status_value.to_string(),
+                    status: Option::Some(self.status_value.value),
+                },
+            )
+        } else {
+            Result::Ok(self)
+        }
+    }
+
+    pub fn sse(self: StreamingResponse) -> Result[SseDecoder[StreamingResponse], Error] {
+        let media = self.headers_value.get("content-type").unwrap_or("").split_once(";").map(
+            |part| part.0,
+        ).unwrap_or(self.headers_value.get("content-type").unwrap_or(""));
+        if ascii_lower(media.trim()) != "text/event-stream" {
+            return Result::Err(
+                Error::new(ErrorKind::Decode, "SSE response requires text/event-stream"),
+            )
+        }
+        SseDecoder::new(self)
+    }
+}
+
+impl Read for StreamingResponse {
+    fn read(self: StreamingResponse, buffer: MutSlice[byte]) -> Result[isize, io::Error] {
+        self.read_bytes(buffer).map_err(streaming_io_error)
+    }
+}
+
+fn streaming_response(
+    reader: Reader,
+    method: string,
+    url: Url,
+    history: Vec[Url],
+    limit: isize,
+    max_headers: i64,
+) -> Result[StreamingResponse, Error] {
+    let budget = Vec::from_array([max_headers]);
+    let mut status = 0;
+    let mut version = "";
+    let mut headers = Headers::new();
+    loop {
+        let line = reader.line(budget)?;
+        let parts = line.split(" ");
+        if parts.len() < 2 || (parts[0] != "HTTP/1.1" && parts[0] != "HTTP/1.0")
+            || parts[1].byte_len() != 3 {
+            return Result::Err(transport_error("invalid HTTP status line"))
+        }
+        version = parts[0];
+        status = decimal(parts[1])?;
+        if status < 100 || status > 599 {
+            return Result::Err(transport_error("invalid HTTP status"))
+        }
+        headers = read_headers(reader, budget)?;
+        if status >= 200 || status == 101 {
+            break
+        }
+    }
+    if status == 101 {
+        return Result::Err(transport_error("protocol upgrades require a dedicated client"))
+    }
+    let mut framing = StreamingFraming::Empty;
+    let mut remaining = 0;
+    if method != "HEAD" && status != 204 && status != 304 {
+        let lengths = headers.get_all("content-length");
+        let transfer = ascii_lower(headers.get_all("transfer-encoding").join(","));
+        if transfer != "" && transfer != "chunked" {
+            return Result::Err(transport_error("unsupported HTTP transfer encoding"))
+        }
+        if transfer == "chunked" {
+            if !lengths.is_empty() {
+                return Result::Err(transport_error("ambiguous HTTP message framing"))
+            }
+            framing = StreamingFraming::Chunked;
+            headers = headers.remove("transfer-encoding");
+        } else if !lengths.is_empty() {
+            let count = decimal(lengths[0])?;
+            for value in lengths {
+                if decimal(value)? != count {
+                    return Result::Err(transport_error("conflicting content lengths"))
+                }
+            }
+            if count > limit {
+                return Result::Err(body_limit_error())
+            }
+            framing = StreamingFraming::Length(count);
+            remaining = count;
+        } else {
+            framing = StreamingFraming::UntilClose;
+        }
+    }
+    let done = match framing {
+        StreamingFraming::Empty => true,
+        StreamingFraming::Length(count) => count == 0,
+        _ => false,
+    };
+    let state = Channel::new(1);
+    state.send(
+        StreamingState {
+            framing,
+            remaining,
+            terminator: false,
+            total: 0,
+            done,
+            trailers: Headers::new(),
+            failure: Option::None,
+        },
+    );
+    let close_gate = Channel::new(1);
+    close_gate.send(());
+    Result::Ok(
+        StreamingResponse {
+            status_value: StatusCode { value: status },
+            headers_value: headers,
+            url_value: url,
+            version_value: version,
+            history_value: history.copy(),
+            reader,
+            state,
+            closed: Channel::new(0),
+            close_gate,
+            limit,
+            header_budget: budget,
+        },
+    )
+}
+
+fn streaming_write_body(
+    stream: Stream,
+    control: context::Context,
+    source: (MutSlice[byte]) -> Result[isize, io::Error],
+    length: Option[isize],
+    limit: isize,
+) -> Result[(), Error] {
+    let buffer: Vec[byte] = Vec::with_capacity(8192);
+    for _ in 0..8192 {
+        buffer.push(0);
+    }
+    let mut total = 0;
+    loop {
+        control.check().map_err(context_error)?;
+        let mut size = 8192;
+        if let Some(expected) = length {
+            if total == expected {
+                return Result::Ok(())
+            }
+            if expected - total < size {
+                size = expected - total;
+            }
+        } else if limit - total < size {
+            size = limit - total + 1;
+        }
+        let count = source(buffer.as_mut_slice().sub(0, size)).map_err(io_error)?;
+        if count < 0 || count > size {
+            return Result::Err(transport_error("invalid upload reader byte count"))
+        }
+        if count == 0 {
+            if length.is_some() {
+                return Result::Err(transport_error("upload ended before its declared length"))
+            }
+            stream.write(b"0\r\n\r\n".as_slice(), control)?;
+            return Result::Ok(())
+        }
+        if count > limit - total {
+            return Result::Err(Error::new(ErrorKind::BodyLimit, "request body exceeds limit"))
+        }
+        if length.is_none() {
+            stream.write(hex_size(count).to_bytes().as_slice(), control)?;
+            stream.write(b"\r\n".as_slice(), control)?;
+        }
+        stream.write(buffer.as_slice().sub(0, count), control)?;
+        if length.is_none() {
+            stream.write(b"\r\n".as_slice(), control)?;
+        }
+        total += count;
+    }
+}
+
+fn hex_size(value: isize) -> string {
+    let digits = "0123456789abcdef";
+    let mut number = value;
+    let mut result = "";
+    while number > 0 {
+        result = digits.byte_slice(number % 16, number % 16 + 1) + result;
+        number = number / 16;
+    }
+    if result == "" {
+        "0"
+    } else {
+        result
+    }
+}
+
+fn streaming_send_head(
+    stream: Stream,
+    control: context::Context,
+    method: string,
+    url: Url,
+    headers: Headers,
+    length: Option[isize],
+    proxy: bool,
+) -> Result[(), Error] {
+    let mut head = method + " "
+        + if proxy {
+            url.text
+        } else {
+            url.target
+        }
+        + " HTTP/1.1\r\nHost: "
+        + url.authority
+        + "\r\nConnection: close\r\n";
+    for (name, value) in headers.entries() {
+        head += name + ": " + value + "\r\n";
+    }
+    head += match length {
+        Some(count) => "Content-Length: " + count.to_string() + "\r\n",
+        None => "Transfer-Encoding: chunked\r\n",
+    };
+    head += "\r\n";
+    stream.write(head.to_bytes().as_slice(), control)
+}
+
+struct StreamingRequestState {
+    url: Url,
+    method: string,
+    headers: Headers,
+    body_enabled: bool,
+    history: Vec[Url],
+}
+
+fn streaming_write_buffered(stream: Stream, control: context::Context, request: Request) -> Result[
+    (),
+    Error,
+] {
+    let mut offset = 0;
+    while offset < request.body_value.len() {
+        let end = if request.body_value.len() - offset > 8192 {
+            offset + 8192
+        } else {
+            request.body_value.len()
+        };
+        let chunk = request.body_value.slice_checked(offset, end).ok_or(
+            transport_error("invalid buffered upload slice"),
+        )?.to_vec_copy();
+        stream.write(chunk.as_slice(), control)?;
+        offset = end;
+    }
+    Result::Ok(())
+}
+
+fn streaming_hop(
+    client: Client,
+    request: Request,
+    source: (MutSlice[byte]) -> Result[isize, io::Error],
+    reader_body: bool,
+    length: Option[isize],
+    control: context::Context,
+    trace_id: i64,
+    consume: (StreamingResponse) -> Result[(), Error],
+    current: StreamingRequestState,
+) -> Result[Option[StreamingRequestState], Error] {
+    let url = current.url;
+    let mut method = current.method;
+    let mut headers = current.headers;
+    let mut body_enabled = current.body_enabled;
+    let history = current.history;
+    control.check().map_err(context_error)?;
+    if client.options.https && !url.is_https() {
+        return Result::Err(Error::new(ErrorKind::Builder, "client requires HTTPS"))
+    }
+    let mut outgoing = headers;
+    if !outgoing.contains("user-agent") {
+        outgoing = outgoing.insert("user-agent", "goml-request/1")?;
+    }
+    if !outgoing.contains("accept-encoding") {
+        outgoing = outgoing.insert("accept-encoding", "identity")?;
+    }
+    if client.options.cookies {
+        outgoing = cookie_headers(client, url, outgoing)?;
+    }
+    let proxy = selected_proxy(client, url)?;
+    let endpoint = proxy.unwrap_or(url);
+    let tunnel = url.secure && proxy.is_some();
+    let stream = if tunnel {
+        connect_tunnel_protocol(
+            client,
+            control,
+            url,
+            outgoing,
+            endpoint,
+            trace_id,
+            history.len(),
+            false,
+        )?
+    } else {
+        connect_stream(client, endpoint, control, false, trace_id, history.len())?
+    };
+    let mut response = Option::None;
+    let outcome: Result[(), Error] = {
+        defer stream.close();
+        let wire_headers = if tunnel {
+            outgoing.remove("proxy-authorization")
+        } else {
+            outgoing
+        };
+        let body_length = if body_enabled {
+            length
+        } else {
+            Option::Some(0)
+        };
+        streaming_send_head(
+            stream,
+            control,
+            method,
+            url,
+            wire_headers,
+            body_length,
+            proxy.is_some() && !tunnel,
+        )?;
+        if body_enabled {
+            if reader_body {
+                streaming_write_body(
+                    stream,
+                    control,
+                    source,
+                    length,
+                    client.options.request_limit_value,
+                )?;
+            } else {
+                streaming_write_buffered(stream, control, request)?;
+            }
+        }
+        trace_event(
+            client,
+            trace_id,
+            history.len(),
+            trace::EventKind::RequestWritten,
+            "stream",
+            Option::None,
+            false,
+            "http/1.1",
+        );
+        let received = streaming_response(
+            Reader::new(stream, control),
+            method,
+            url,
+            history,
+            request.body_limit_value,
+            client.options.max_headers,
+        )?;
+        defer received.close();
+        if client.options.cookies {
+            store_cookies(client, url, received.headers_value);
+        }
+        trace_event(
+            client,
+            trace_id,
+            history.len(),
+            trace::EventKind::ResponseReceived,
+            "stream",
+            Option::Some(received.status_value.value),
+            false,
+            received.version_value,
+        );
+        let status = received.status_value.value;
+        let redirect = status == 301 || status == 302 || status == 303 || status == 307
+            || status == 308;
+        let follow = match request.redirects {
+            RedirectPolicy::None => false,
+            _ => redirect && received.headers_value.contains("location"),
+        };
+        if !follow {
+            let result = consume(received);
+            if let Some(error) = received.failure() {
+                return Result::Err(error)
+            }
+            result?;
+            return Result::Ok(Option::None)
+        }
+        response = Option::Some((status, received.headers_value));
+        Result::Ok(())
+    };
+    outcome?;
+    let (status, response_headers) = response.ok_or(transport_error("missing streaming redirect"))?;
+    let limit = match request.redirects {
+        RedirectPolicy::Limited(count) | RedirectPolicy::SameOrigin(count) => count,
+        _ => 0,
+    };
+    if history.len() >= limit {
+        return Result::Err(Error::new(ErrorKind::Redirect, "redirect limit exceeded"))
+    }
+    let next = url.join(response_headers.get("location").unwrap_or("")).map_err(
+        |error| Error::new(ErrorKind::Redirect, error.message),
+    )?;
+    if url.secure && !next.secure {
+        return Result::Err(Error::new(ErrorKind::Redirect, "HTTPS downgrade redirect rejected"))
+    }
+    match request.redirects {
+        RedirectPolicy::SameOrigin(_) => if url.origin != next.origin {
+            return Result::Err(Error::new(ErrorKind::Redirect, "cross-origin redirect rejected"))
+        },
+        _ => (),
+    }
+    if ((status == 301 || status == 302) && method == "POST") || (status == 303 && method != "HEAD") {
+        method = "GET";
+        body_enabled = false;
+        headers = headers.remove("content-type").remove("content-encoding");
+    } else if reader_body && body_enabled && length != Option::Some(0) {
+        return Result::Err(
+            Error::new(ErrorKind::Redirect, "cannot replay a streaming upload across this redirect"),
+        )
+    }
+    if url.origin != next.origin {
+        headers = headers.remove("authorization").remove("proxy-authorization").remove("cookie").remove(
+            "cookie2",
+        ).remove("www-authenticate");
+    }
+    trace_event(
+        client,
+        trace_id,
+        history.len(),
+        trace::EventKind::Redirect,
+        next.text,
+        Option::Some(status),
+        false,
+        "http/1.1",
+    );
+    history.push(url);
+    Result::Ok(
+        Option::Some(StreamingRequestState { url: next, method, headers, body_enabled, history }),
+    )
+}
+
+fn streaming_loop(
+    client: Client,
+    request: Request,
+    source: (MutSlice[byte]) -> Result[isize, io::Error],
+    reader_body: bool,
+    length: Option[isize],
+    control: context::Context,
+    trace_id: i64,
+    consume: (StreamingResponse) -> Result[(), Error],
+) -> Result[(), Error] {
+    let mut current = StreamingRequestState {
+        url: request.url_value,
+        method: request.method_value,
+        headers: request.headers_value,
+        body_enabled: true,
+        history: Vec::new(),
+    };
+    loop {
+        match streaming_hop(
+            client,
+            request,
+            source,
+            reader_body,
+            length,
+            control,
+            trace_id,
+            consume,
+            current,
+        )? {
+            Some(next) => {
+                current = next;
+            },
+            None => return Result::Ok(()),
+        }
+    }
+}
+
+fn streaming_execute_erased(
+    client: Client,
+    request: Request,
+    source: (MutSlice[byte]) -> Result[isize, io::Error],
+    reader_body: bool,
+    length: Option[isize],
+    parent: context::Context,
+    consume: (StreamingResponse) -> Result[(), Error],
+) -> Result[(), Error] {
+    if client.is_closed() {
+        return Result::Err(Error::new(ErrorKind::Closed, "client is closed"))
+    }
+    parent.check().map_err(context_error)?;
+    if let Some(count) = length {
+        if count < 0 {
+            return Result::Err(Error::new(ErrorKind::Builder, "negative upload length"))
+        }
+        if count > client.options.request_limit_value {
+            return Result::Err(Error::new(ErrorKind::BodyLimit, "request body exceeds limit"))
+        }
+    }
+    let trace_id = client.options.trace_value.map(
+        |value| value.begin(request.method_value, request.url_value.text),
+    ).unwrap_or(0);
+    let result = context::with_timeout(
+        parent,
+        request.timeout_value,
+        |control, cancel| task::scope(
+            |scope| {
+                let done: Channel[()] = Channel::new(0);
+                defer done.close();
+                let _ = scope.spawn(
+                    |_| select {
+                        recv(client.closed) as _ => cancel.cancel(),
+                        recv(done) as _ => (),
+                    },
+                );
+                let result = streaming_loop(
+                    client,
+                    request,
+                    source,
+                    reader_body,
+                    length,
+                    control,
+                    trace_id,
+                    consume,
+                );
+                if client.is_closed() {
+                    return Result::Err(Error::new(ErrorKind::Closed, "client is closed"))
+                }
+                parent.check().map_err(context_error)?;
+                control.check().map_err(context_error)?;
+                result
+            },
+        ),
+    );
+    match result {
+        Ok(_) => trace_event(
+            client,
+            trace_id,
+            0,
+            trace::EventKind::RequestDone,
+            "stream",
+            Option::None,
+            false,
+            "http/1.1",
+        ),
+        Err(error) => trace_event(
+            client,
+            trace_id,
+            0,
+            trace::EventKind::RequestFailed,
+            error.message,
+            Option::None,
+            false,
+            "http/1.1",
+        ),
+    }
+    result
+}
+
+fn streaming_execute[R: Read, T](
+    client: Client,
+    request: Request,
+    source: R,
+    reader_body: bool,
+    length: Option[isize],
+    parent: context::Context,
+    consume: (StreamingResponse) -> Result[T, Error],
+) -> Result[T, Error] {
+    let output: Ref[Option[T]] = Ref::new(Option::None);
+    streaming_execute_erased(
+        client,
+        request,
+        |buffer: MutSlice[byte]| source.read(buffer),
+        reader_body,
+        length,
+        parent,
+        |response| {
+            let value = consume(response)?;
+            output.set(Option::Some(value));
+            Result::Ok(())
+        },
+    )?;
+    output.get().ok_or(transport_error("streaming callback did not complete"))
+}
+
+impl RequestBuilder {
+    pub fn send_stream[T](self: RequestBuilder, consume: (StreamingResponse) -> Result[T, Error]) -> Result[
+        T,
+        Error,
+    ] {
+        self.send_stream_with(context::Context::background(), consume)
+    }
+
+    pub fn send_stream_with[T](
+        self: RequestBuilder,
+        parent: context::Context,
+        consume: (StreamingResponse) -> Result[T, Error],
+    ) -> Result[T, Error] {
+        self.client.execute_stream_with(self.build()?, parent, consume)
+    }
+
+    pub fn send_reader[R: Read, T](
+        self: RequestBuilder,
+        reader: R,
+        length: Option[isize],
+        consume: (StreamingResponse) -> Result[T, Error],
+    ) -> Result[T, Error] {
+        self.send_reader_with(reader, length, context::Context::background(), consume)
+    }
+
+    pub fn send_reader_with[R: Read, T](
+        self: RequestBuilder,
+        reader: R,
+        length: Option[isize],
+        parent: context::Context,
+        consume: (StreamingResponse) -> Result[T, Error],
+    ) -> Result[T, Error] {
+        let request = self.build()?;
+        if !request.body_value.is_empty() {
+            return Result::Err(
+                Error::new(ErrorKind::Builder, "streaming upload cannot also have a buffered body"),
+            )
+        }
+        streaming_execute(self.client, request, reader, true, length, parent, consume)
+    }
+}
+
+impl Client {
+    pub fn execute_stream[T](
+        self: Client,
+        request: Request,
+        consume: (StreamingResponse) -> Result[T, Error],
+    ) -> Result[T, Error] {
+        self.execute_stream_with(request, context::Context::background(), consume)
+    }
+
+    pub fn execute_stream_with[T](
+        self: Client,
+        request: Request,
+        parent: context::Context,
+        consume: (StreamingResponse) -> Result[T, Error],
+    ) -> Result[T, Error] {
+        streaming_execute(
+            self,
+            request,
+            io::StringReader::new(""),
+            false,
+            Option::Some(request.body_value.len()),
+            parent,
+            consume,
+        )
+    }
+}

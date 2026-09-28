@@ -1,0 +1,234 @@
+package request;
+
+use std::io;
+use io::Read;
+use std::utf8;
+
+#[derive(PartialEq)]
+pub struct SseEvent {
+    pub event: string,
+    pub data: string,
+    pub id: string,
+    pub retry_millis: Option[isize],
+}
+
+struct SseState {
+    first_line: bool,
+    after_cr: bool,
+    last_id: string,
+    pending_id: string,
+    retry: Option[isize],
+    done: bool,
+    failure: Option[Error],
+}
+
+pub struct SseDecoder[R] {
+    reader: io::BufReader[R],
+    state: Channel[SseState],
+    max_line: isize,
+    max_event: isize,
+}
+
+fn sse_error(message: string) -> Error {
+    Error::new(ErrorKind::Decode, message)
+}
+
+fn sse_decode_line(bytes: Vec[byte], state: Ref[SseState]) -> string {
+    let mut line = utf8::decode_lossy(bytes.as_slice());
+    if state.get().first_line {
+        state.set(SseState { first_line: false, ..state.get() });
+        if line.starts_with("﻿") {
+            line = line.byte_slice(3, line.byte_len());
+        }
+    }
+    line
+}
+
+fn sse_line[R: Read](decoder: SseDecoder[R], state: Ref[SseState]) -> Result[Option[string], Error] {
+    if state.get().done {
+        return Result::Ok(Option::None)
+    }
+    let bytes: Vec[byte] = Vec::new();
+    loop {
+        let next = decoder.reader.read_byte().map_err(io_error)?;
+        let byte = match next {
+            Some(value) => value,
+            None => {
+                state.set(SseState { done: true, ..state.get() });
+                return Result::Ok(
+                    if bytes.is_empty() {
+                        Option::None
+                    } else {
+                        Option::Some(sse_decode_line(bytes, state))
+                    },
+                )
+            },
+        };
+        if state.get().after_cr {
+            state.set(SseState { after_cr: false, ..state.get() });
+            if byte == 10 {
+                continue
+            }
+        }
+        if byte == 13 || byte == 10 {
+            if byte == 13 {
+                state.set(SseState { after_cr: true, ..state.get() });
+            }
+            return Result::Ok(Option::Some(sse_decode_line(bytes, state)))
+        }
+        if bytes.len() >= decoder.max_line {
+            return Result::Err(sse_error("SSE line exceeds limit"))
+        }
+        bytes.push(byte);
+    }
+}
+
+fn sse_next[R: Read](decoder: SseDecoder[R], state: Ref[SseState]) -> Result[
+    Option[SseEvent],
+    Error,
+] {
+    if let Some(error) = state.get().failure {
+        return Result::Err(error)
+    }
+    if state.get().done {
+        return Result::Ok(Option::None)
+    }
+    let data: Vec[string] = Vec::new();
+    let mut event = "";
+    let mut seen_data = false;
+    let mut bytes = 0;
+    loop {
+        let line = match sse_line(decoder, state)? {
+            Some(value) => value,
+            None => return Result::Ok(Option::None),
+        };
+        if line == "" {
+            state.set(SseState { last_id: state.get().pending_id, ..state.get() });
+            if seen_data {
+                return Result::Ok(
+                    Option::Some(
+                        SseEvent {
+                            event: if event == "" {
+                                "message"
+                            } else {
+                                event
+                            },
+                            data: data.join("\n"),
+                            id: state.get().last_id,
+                            retry_millis: state.get().retry,
+                        },
+                    ),
+                )
+            }
+            event = "";
+            bytes = 0;
+            continue
+        }
+        if line.byte_len() >= decoder.max_event - bytes {
+            return Result::Err(sse_error("SSE event exceeds limit"))
+        }
+        bytes += line.byte_len() + 1;
+        if line.starts_with(":") {
+            continue
+        }
+        let (name, raw) = line.split_once(":").unwrap_or((line, ""));
+        let value = if raw.starts_with(" ") {
+            raw.byte_slice(1, raw.byte_len())
+        } else {
+            raw
+        };
+        if name == "data" {
+            data.push(value);
+            seen_data = true;
+        } else if name == "event" {
+            event = value;
+        } else if name == "id" {
+            if !value.to_bytes().contains(0) {
+                state.set(SseState { pending_id: value, ..state.get() });
+            }
+        } else if name == "retry" {
+            if let Ok(delay) = decimal(value) {
+                state.set(SseState { retry: Option::Some(delay), ..state.get() });
+            }
+        }
+    }
+}
+
+impl[R: Read] SseDecoder[R] {
+    pub fn new(reader: R) -> Result[SseDecoder[R], Error] {
+        SseDecoder::with_limits(reader, 65536, 1048576)
+    }
+
+    pub fn with_limits(reader: R, max_line: isize, max_event: isize) -> Result[SseDecoder[R], Error] {
+        if max_line < 1 || max_event < 1 || max_line > 16777216 || max_event > 16777216 {
+            return Result::Err(
+                Error::new(ErrorKind::Builder, "SSE limits must be within 1..16777216"),
+            )
+        }
+        let state = Channel::new(1);
+        state.send(
+            SseState {
+                first_line: true,
+                after_cr: false,
+                last_id: "",
+                pending_id: "",
+                retry: Option::None,
+                done: false,
+                failure: Option::None,
+            },
+        );
+        Result::Ok(
+            SseDecoder {
+                reader: io::BufReader::with_capacity(reader, 4096).map_err(io_error)?,
+                state,
+                max_line,
+                max_event,
+            },
+        )
+    }
+
+    pub fn next(self: SseDecoder[R]) -> Result[Option[SseEvent], Error] {
+        let value = self.state.recv().ok_or(sse_error("SSE decoder is closed"))?;
+        let state = Ref::new(value);
+        let result = sse_next(self, state);
+        if let Err(error) = result {
+            state.set(SseState { failure: Option::Some(error), ..state.get() });
+        }
+        self.state.send(state.get());
+        result
+    }
+
+    pub fn last_event_id(self: SseDecoder[R]) -> string {
+        let value = self.state.recv().unwrap_or(
+            SseState {
+                first_line: false,
+                after_cr: false,
+                last_id: "",
+                pending_id: "",
+                retry: Option::None,
+                done: true,
+                failure: Option::None,
+            },
+        );
+        let result = value.last_id;
+        self.state.send(value);
+        result
+    }
+
+    pub fn retry_millis(self: SseDecoder[R]) -> Option[isize] {
+        let value = self.state.recv().unwrap_or(
+            SseState {
+                first_line: false,
+                after_cr: false,
+                last_id: "",
+                pending_id: "",
+                retry: Option::None,
+                done: true,
+                failure: Option::None,
+            },
+        );
+        let result = value.retry;
+        self.state.send(value);
+        result
+    }
+}

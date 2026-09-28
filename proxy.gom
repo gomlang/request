@@ -97,6 +97,19 @@ fn connect_tunnel(
     trace_id: i64,
     attempt: isize,
 ) -> Result[Stream, Error] {
+    connect_tunnel_protocol(client, context, url, headers, proxy, trace_id, attempt, true)
+}
+
+fn connect_tunnel_protocol(
+    client: Client,
+    context: context::Context,
+    url: Url,
+    headers: Headers,
+    proxy: Url,
+    trace_id: i64,
+    attempt: isize,
+    h2: bool,
+) -> Result[Stream, Error] {
     let proxy_stream = connect_stream(client, proxy, context, false, trace_id, attempt)?;
     let mut keep = false;
     defer {
@@ -141,7 +154,13 @@ fn connect_tunnel(
     let control = start_tunnel_relay(listener, proxy_stream);
     let mut config = tls::ClientConfig::new(url.host).with_connect_timeout(
         client.options.connect_value,
-    ).with_alpn(Vec::from_array(["h2", "http/1.1"]));
+    ).with_alpn(
+        if h2 {
+            Vec::from_array(["h2", "http/1.1"])
+        } else {
+            Vec::from_array(["http/1.1"])
+        },
+    );
     if client.options.ca.trim() != "" {
         config = config.with_ca_pem(client.options.ca.to_bytes().as_slice());
     }

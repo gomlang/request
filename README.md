@@ -104,6 +104,84 @@ fn upload(client: Client, url: string, bytes: Bytes) -> Result[(), Error] {
 }
 ```
 
+## Streaming bodies and SSE
+
+`send_stream(consume)` invokes `consume(StreamingResponse)` as soon as response
+headers arrive. It reads the body incrementally while the callback runs.
+`StreamingResponse` implements `io::Read` and also exposes `read_bytes(buffer)`,
+`chunk(max_bytes)`, and `copy_to(writer)`. `chunk` accepts capacities from 1 byte
+through 1 MiB and returns `None` at EOF; a chunk can be shorter than requested.
+`copy_to` uses an 8 KiB buffer. Status, headers, URL, version, redirect history,
+`error_for_status()`, declared `content_length(): Option[isize]`, and completed
+chunked `trailers()` remain available without collecting the body.
+
+```gom
+use ecosystem::request::{Client, Error};
+use std::io::{Read, Write};
+
+fn download[W: Write](client: Client, url: string, destination: W) -> Result[u64, Error] {
+    client.get(url).send_stream(|response| {
+        response.error_for_status()?.copy_to(destination)
+    })
+}
+
+fn upload[R: Read, W: Write](client: Client, url: string, source: R, destination: W) -> Result[u64, Error] {
+    client.post(url).send_reader(source, Option::None, |response| {
+        response.error_for_status()?.copy_to(destination)
+    })
+}
+```
+
+`send_reader(reader, length, consume)` streams an `io::Read` source in bounded
+chunks. `Some(length)` sends Content-Length and consumes exactly that many
+bytes; an early EOF is an error and later source bytes remain unread. `None`
+uses HTTP/1.1 chunked transfer encoding until source EOF. Request limits apply
+to bytes actually read and sent; a declared excessive length fails before any
+network I/O. Combining `send_reader` with an existing buffered body is an error.
+A caller-provided reader remains caller-owned and must arrange cancellation for
+its own blocking reads. The transport checks cancellation between reads and
+uses the request context for socket operations.
+
+`send_stream_with(context, consume)` and
+`send_reader_with(reader, length, context, consume)` accept cancellation.
+`Client.execute_stream` / `execute_stream_with` accept a built buffered Request.
+The configured whole-request timeout covers the callback and its body reads.
+`Client.close()` cancels active streams. Callback completion, early return,
+errors, and panic unwinding close the connection; `StreamingResponse.close()`
+can close it earlier. Copies returned from the callback are closed and cannot
+continue reading. Readers of one response are serialized. No finalizer or
+background body buffering is involved.
+
+Streaming currently negotiates HTTP/1.1, including HTTPS and CONNECT tunnels,
+and closes its connection at the end of each callback. The existing `send()`
+API retains buffered HTTP/2, HTTP/1.1 pooling, and automatic gzip decoding.
+Streaming requests send `Accept-Encoding: identity` by default and preserve
+explicitly requested content encodings as raw bytes; they do not invoke the
+buffered gzip decoder. Response limits count the streamed representation bytes.
+Content-Length, chunked framing, EOF framing, trailers, malformed-message
+errors, cookies, proxies and redirect security policies are supported.
+Buffered uploads can be replayed across redirects. A streaming upload follows
+redirects that switch to GET; a redirect requiring replay returns a Redirect
+error, unless the declared body length is zero. Intermediate redirect bodies
+are discarded by closing their connections.
+
+`StreamingResponse.sse()` checks `Content-Type: text/event-stream` and returns
+an incremental `SseDecoder[StreamingResponse]`. Its `next()` returns
+`Result[Option[SseEvent], Error]`. Events have public `event`, `data`, `id`, and
+`retry_millis` fields. `SseDecoder::new(reader)` also accepts any `io::Read`;
+`with_limits(reader, max_line, max_event)` customizes its default 64 KiB line
+and 1 MiB event budgets, up to 16 MiB each.
+
+The decoder follows the [HTML event-stream parsing rules](https://html.spec.whatwg.org/multipage/server-sent-events.html#parsing-an-event-stream):
+UTF-8 replacement decoding and a leading BOM, LF/CRLF/CR line endings,
+comments, multiline data, event names, persistent and reset event IDs, and
+numeric retry values. NUL-containing IDs and invalid retries are ignored.
+An unterminated event at EOF is discarded. `last_event_id()` reports the last
+completed event boundary, and `retry_millis()` exposes the latest parsed retry.
+The caller controls reconnection, Last-Event-ID headers, and retry scheduling;
+the decoder never reconnects automatically. Configure a suitable request
+`timeout` and `body_limit` for long-lived SSE connections.
+
 ## Responses, limits and lifecycle
 
 `send()` reads the complete response within its limit and releases its transport
