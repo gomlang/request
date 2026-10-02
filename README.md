@@ -16,8 +16,8 @@ serializer's uppercase normalization. Absolute URL decomposition and path-escape
 validation use `std::net::url::Reference`; raw query parsing remains separate.
 Fragment text is dropped before decomposition, retaining the client's existing
 fragment policy. HTTP(S), credential and redirect policies
-remain in this ecosystem module. These shared APIs require the development
-toolchain containing `std::net::url`; this change does not publish a registry version.
+remain in this ecosystem module. These shared APIs are included in the required GoML 0.1.56 or newer toolchain;
+this change does not publish a registry version.
 
 The implementation is pure GoML: URL and MIME encoding, HTTP/1.1 framing,
 HTTP/2 and HPACK, connection pooling, cookies, proxies and redirects are ordinary
@@ -300,9 +300,8 @@ SameSite because this HTTP client has no browser top-level-site context.
 
 ## Scope and verification
 
-This implementation does not claim Rust API or feature parity. Streaming
-uploads/responses, async/await APIs, HTTP/3, WebSockets, Brotli/Zstd, a persistent
-cookie persistence, custom DNS resolution, custom
+This implementation does not claim Rust API or feature parity. HTTP/2 streaming, async/await APIs, HTTP/3, WebSockets, Brotli/Zstd,
+persistent cookies, custom DNS resolution, custom
 TLS backends, automatic application retries and middleware are not implemented.
 Text decoding is strict UTF-8 and does not inspect charset labels. Header values
 are UTF-8 strings rather than arbitrary octets. HTTP/2 over TLS uses ALPN;
