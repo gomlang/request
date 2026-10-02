@@ -164,7 +164,13 @@ and streaming HTTP/1.1 responses validate chunk extension names, optional token
 or quoted values, escapes and separators under
 [RFC 9112 section 7.1.1](https://www.rfc-editor.org/rfc/rfc9112.html#section-7.1.1).
 Valid unknown extensions are ignored; malformed ones fail with a Transport
-error. Each chunk-size line, including extensions and CRLF, is capped at 8 KiB.
+error. HTTP/1.1 buffered/streaming and HTTP/2 response trailers consistently
+reject Content-Length, Transfer-Encoding and Host, since framing/routing must
+be established before the body ([RFC 9110 section 6.5](https://www.rfc-editor.org/rfc/rfc9110.html#section-6.5)).
+Unknown extension fields remain accepted; normal HTTP/2 header restrictions
+still apply. Buffered responses validate then discard trailers; streaming
+HTTP/1.1 responses expose them only after the body is fully consumed.
+Each chunk-size line, including extensions and CRLF, is capped at 8 KiB.
 Buffered uploads can be replayed across redirects. A streaming upload follows
 redirects that switch to GET; a redirect requiring replay returns a Redirect
 error, unless the declared body length is zero. Intermediate redirect bodies

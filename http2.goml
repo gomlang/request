@@ -188,6 +188,9 @@ fn http2_response_headers(fields: Vec[(string, string)], trailers: bool) -> Resu
     if !trailers && status == 0 {
         return Result::Err(transport_error("missing HTTP/2 status"))
     }
+    if trailers {
+        validate_trailers(headers)?;
+    }
     Result::Ok((status, headers))
 }
 

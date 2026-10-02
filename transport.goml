@@ -652,7 +652,8 @@ fn http1_exchange(
             loop {
                 let count = chunk_size(reader.line(Vec::from_array([8192]))?)?;
                 if count == 0 {
-                    let _ = read_headers(reader, budget)?;
+                    let trailers = read_headers(reader, budget)?;
+                    validate_trailers(trailers)?;
                     break
                 }
                 if count > limit - payload.len() {

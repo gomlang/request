@@ -1,0 +1,10 @@
+package request;
+
+fn validate_trailers(headers: Headers) -> Result[(), Error] {
+    for name in["content-length", "transfer-encoding", "host"] {
+        if headers.contains(name) {
+            return Result::Err(transport_error("forbidden HTTP framing or routing trailer"))
+        }
+    }
+    Result::Ok(())
+}
