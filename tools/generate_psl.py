@@ -6,7 +6,7 @@ from urllib.request import urlopen
 
 SOURCE = "https://publicsuffix.org/list/public_suffix_list.dat"
 SHA256 = "e81c6f5f11359a79a2479238e732e08bd8521071fd95ee47053471e3426d7b54"
-TARGET = Path(__file__).resolve().parents[1] / "cookies" / "builtin.gom"
+TARGET = Path(__file__).resolve().parents[1] / "cookies" / "builtin.goml"
 
 
 def ascii_rule(rule):
