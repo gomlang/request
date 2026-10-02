@@ -1,0 +1,89 @@
+package request;
+
+fn chunk_horizontal(byte: byte) -> bool {
+    byte == b' ' || byte == b'\t'
+}
+
+fn chunk_skip_horizontal(line: string, cursor: Ref[isize]) -> () {
+    while cursor.get() < line.byte_len() && chunk_horizontal(line.byte_get(cursor.get())) {
+        cursor.set(cursor.get() + 1);
+    }
+}
+
+fn chunk_token(line: string, cursor: Ref[isize]) -> bool {
+    let start = cursor.get();
+    while cursor.get() < line.byte_len() {
+        let byte = line.byte_get(cursor.get());
+        if byte >= 128 || !token(line.byte_slice(cursor.get(), cursor.get() + 1)) {
+            break
+        }
+        cursor.set(cursor.get() + 1);
+    }
+    cursor.get() > start
+}
+
+fn chunk_size(line: string) -> Result[isize, Error] {
+    let cursor = Ref::new(0);
+    let mut count = 0;
+    while cursor.get() < line.byte_len() {
+        let digit = hex_digit(line.byte_get(cursor.get()));
+        if digit < 0 {
+            break
+        }
+        if count > (9223372036854775807 - digit) / 16 {
+            return Result::Err(transport_error("invalid HTTP chunk size"))
+        }
+        count = count * 16 + digit;
+        cursor.set(cursor.get() + 1);
+    }
+    if cursor.get() == 0 {
+        return Result::Err(transport_error("invalid HTTP chunk size"))
+    }
+    while cursor.get() < line.byte_len() {
+        chunk_skip_horizontal(line, cursor);
+        if cursor.get() == line.byte_len() || line.byte_get(cursor.get()) != b';' {
+            return Result::Err(transport_error("invalid HTTP chunk extension separator"))
+        }
+        cursor.set(cursor.get() + 1);
+        chunk_skip_horizontal(line, cursor);
+        if !chunk_token(line, cursor) {
+            return Result::Err(transport_error("invalid HTTP chunk extension name"))
+        }
+        let after_name = cursor.get();
+        chunk_skip_horizontal(line, cursor);
+        if cursor.get() == line.byte_len() || line.byte_get(cursor.get()) != b'=' {
+            cursor.set(after_name);
+            continue
+        }
+        cursor.set(cursor.get() + 1);
+        chunk_skip_horizontal(line, cursor);
+        if cursor.get() < line.byte_len() && line.byte_get(cursor.get()) == b'"' {
+            cursor.set(cursor.get() + 1);
+            let mut closed = false;
+            while cursor.get() < line.byte_len() {
+                let mut byte = line.byte_get(cursor.get());
+                cursor.set(cursor.get() + 1);
+                if byte == b'"' {
+                    closed = true;
+                    break
+                }
+                if byte == b'\\' {
+                    if cursor.get() == line.byte_len() {
+                        break
+                    }
+                    byte = line.byte_get(cursor.get());
+                    cursor.set(cursor.get() + 1);
+                }
+                if (byte < 32 && byte != b'\t') || byte == 127 {
+                    return Result::Err(transport_error("invalid HTTP chunk quoted extension"))
+                }
+            }
+            if !closed {
+                return Result::Err(transport_error("unterminated HTTP chunk extension"))
+            }
+        } else if !chunk_token(line, cursor) {
+            return Result::Err(transport_error("invalid HTTP chunk extension value"))
+        }
+    }
+    Result::Ok(count)
+}

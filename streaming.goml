@@ -81,20 +81,7 @@ fn streaming_read_available(reader: Reader, buffer: MutSlice[byte]) -> Result[is
 }
 
 fn streaming_chunk_size(reader: Reader) -> Result[isize, Error] {
-    let line = reader.line(Vec::from_array([8192]))?;
-    let size = line.split_once(";").map(|part| part.0).unwrap_or(line);
-    if size == "" {
-        return Result::Err(transport_error("invalid HTTP chunk size"))
-    }
-    let mut count = 0;
-    for byte in size.to_bytes() {
-        let digit = hex_digit(byte);
-        if digit < 0 || count > (9223372036854775807 - digit) / 16 {
-            return Result::Err(transport_error("invalid HTTP chunk size"))
-        }
-        count = count * 16 + digit;
-    }
-    Result::Ok(count)
+    chunk_size(reader.line(Vec::from_array([8192]))?)
 }
 
 fn streaming_read_locked(

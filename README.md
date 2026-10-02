@@ -159,7 +159,12 @@ Streaming requests send `Accept-Encoding: identity` by default and preserve
 explicitly requested content encodings as raw bytes; they do not invoke the
 buffered gzip decoder. Response limits count the streamed representation bytes.
 Content-Length, chunked framing, EOF framing, trailers, malformed-message
-errors, cookies, proxies and redirect security policies are supported.
+errors, cookies, proxies and redirect security policies are supported. Buffered
+and streaming HTTP/1.1 responses validate chunk extension names, optional token
+or quoted values, escapes and separators under
+[RFC 9112 section 7.1.1](https://www.rfc-editor.org/rfc/rfc9112.html#section-7.1.1).
+Valid unknown extensions are ignored; malformed ones fail with a Transport
+error. Each chunk-size line, including extensions and CRLF, is capped at 8 KiB.
 Buffered uploads can be replayed across redirects. A streaming upload follows
 redirects that switch to GET; a redirect requiring replay returns a Redirect
 error, unless the declared body length is zero. Intermediate redirect bodies

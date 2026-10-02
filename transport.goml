@@ -650,19 +650,7 @@ fn http1_exchange(
                 return Result::Err(transport_error("ambiguous HTTP message framing"))
             }
             loop {
-                let size = reader.line(Vec::from_array([8192]))?;
-                let size = size.split_once(";").map(|value| value.0).unwrap_or(size);
-                if size == "" {
-                    return Result::Err(transport_error("invalid HTTP chunk size"))
-                }
-                let mut count = 0;
-                for byte in size.to_bytes() {
-                    let digit = hex_digit(byte);
-                    if digit < 0 || count > (9223372036854775807 - digit) / 16 {
-                        return Result::Err(transport_error("invalid HTTP chunk size"))
-                    }
-                    count = count * 16 + digit;
-                }
+                let count = chunk_size(reader.line(Vec::from_array([8192]))?)?;
                 if count == 0 {
                     let _ = read_headers(reader, budget)?;
                     break
