@@ -9,21 +9,41 @@ use io::{Read, Write};
 use std::context;
 use std::bytes::{Bytes};
 use std::time::{Duration};
+use std::panic;
 
 fn streaming_peer(server: (net::TcpStream) -> (), body: (string) -> ()) -> () {
+    streaming_peer_after(|| (), server, body)
+}
+
+fn streaming_peer_after(
+    before_accept: () -> (),
+    server: (net::TcpStream) -> (),
+    body: (string) -> (),
+) -> () {
     let listener = testing::expect_ok(
         net::TcpListener::bind(net::SocketAddr::new(net::IpAddr::V4([127, 0, 0, 1]), 0)),
         "stream listener",
     );
+    defer {
+        let _ = listener.close();
+    };
     let address = testing::expect_ok(listener.local_addr(), "stream address");
     task::scope(
         |scope| {
-            defer {
-                let _ = listener.close();
-            };
             let _ = scope.spawn(
-                |_| {
-                    let (socket, _) = testing::expect_ok(listener.accept(), "stream accept");
+                |cancel| {
+                    before_accept();
+                    let accepted = listener.accept_with(
+                        net::WaitOptions::new().with_cancel(cancel).with_timeout(
+                            Duration::from_seconds(3),
+                        ),
+                    );
+                    if let Err(problem) = accepted {
+                        if cancel.is_cancelled() && problem.kind() == io::ErrorKind::Interrupted {
+                            return
+                        }
+                    }
+                    let (socket, _) = testing::expect_ok(accepted, "stream accept");
                     defer {
                         let _ = socket.close();
                     };
@@ -33,6 +53,58 @@ fn streaming_peer(server: (net::TcpStream) -> (), body: (string) -> ()) -> () {
             body("http://" + address.to_string());
         },
     );
+}
+
+#[test]
+fn streaming_peer_accepts_queued_connection_after_body_returns() -> () {
+    let ready: Channel[()] = Channel::new(0);
+    let received: Channel[()] = Channel::new(1);
+    streaming_peer_after(
+        || {
+            let _ = ready.recv();
+        },
+        |socket| {
+            testing::assert_eq(streaming_head(socket), "POST / HTTP/1.1\nContent-Length: 4\n");
+            let bytes = Vec::from_array([0, 0, 0, 0]);
+            testing::expect_ok(socket.read_exact(bytes.as_mut_slice()), "queued upload");
+            testing::assert_eq(string_from_utf8(bytes).1, "body");
+            received.send(());
+        },
+        |url| {
+            defer ready.close();
+            let address = testing::expect_ok(
+                net::SocketAddr::parse(url.byte_slice(7, url.byte_len())),
+                "queued address",
+            );
+            let socket = testing::expect_ok(net::TcpStream::connect(address), "queued connection");
+            defer {
+                let _ = socket.close();
+            };
+            testing::expect_ok(
+                socket.write_all(b"POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\nbody".as_slice()),
+                "queued request",
+            );
+        },
+    );
+    testing::assert_some(received.recv());
+}
+
+#[test]
+fn streaming_peer_cancels_accept_when_body_panics_without_connecting() -> () {
+    let scopes = task::active_scope_count();
+    let problem = testing::expect_err(
+        panic::catch(
+            || {
+                streaming_peer(
+                    |_| panic::raise("unexpected streaming peer connection"),
+                    |_| panic::raise("streaming client stopped before connect"),
+                );
+            },
+        ),
+        "client failure",
+    );
+    testing::assert_eq(problem.message(), "streaming client stopped before connect");
+    testing::assert_eq(task::active_scope_count(), scopes);
 }
 
 fn streaming_line(socket: net::TcpStream) -> string {
