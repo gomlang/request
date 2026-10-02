@@ -320,7 +320,7 @@ PEM framing is checked during building; TLS validates certificate contents
 and identity keys when connecting.
 
 `go.mod` belongs solely to the local `testserver/` interoperability fixture;
-the library manifest has no native module declaration. The independent consumer
+the library manifest has no native module declaration. The `examples/basic` example
 and its local HTTP peer are pure GoML and need no `go.mod`.
 The RFC 7541 HPACK table constants were transcribed from Go's vendored
 `x/net/http2/hpack`; its BSD license is retained in `LICENSE.hpack.txt`.
@@ -331,8 +331,8 @@ From the repository root:
 (cd ../verification && just ecosystem-test request)
 ```
 
-GoML library and consumer tests use local ephemeral HTTP/HTTPS servers and
-fresh certificates. Consumer tests check HTTP/1.1, Unicode query/form data,
+GoML library and example tests use local ephemeral HTTP/HTTPS servers and
+fresh certificates. Example tests check HTTP/1.1, Unicode query/form data,
 duplicate headers, typed JSON, redirects, response limits and chunked bodies.
 Native Go test fixtures provide HTTP/TLS transport; all scenarios and assertions
 run from `#[test]`. Cancellation tests synchronize with server request arrival.
@@ -346,3 +346,15 @@ clients under Go's race detector. No external service is required.
 Reference API: [Rust reqwest ClientBuilder](https://docs.rs/reqwest/latest/reqwest/blocking/struct.ClientBuilder.html),
 [redirect policy](https://docs.rs/reqwest/latest/reqwest/redirect/struct.Policy.html),
 and [Go HTTP client/transport](https://pkg.go.dev/net/http).
+
+## Development and examples
+
+Requires GoML 0.1.55 or newer. The `examples/basic/` example shares the root manifest and its dependencies. From the library root, run:
+
+```sh
+goml run --example basic
+goml test
+goml verify --timeout 300s
+```
+
+`goml test` builds the example and runs its tests. `goml verify` repeats the example checks as an independent module against an isolated registry snapshot. `(cd ../verification && just ecosystem-test request)` also retains the library-specific smoke and compatibility checks.

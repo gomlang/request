@@ -1,6 +1,6 @@
 package tests;
 
-use consumer::request as app;
+use ecosystem::request::examples::basic as app;
 use ecosystem::request::{Client, Url, Headers};
 use ecosystem::request::cookies;
 use std::testing;

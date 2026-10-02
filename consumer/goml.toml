@@ -1,5 +1,0 @@
-[module]
-path = "consumer::request"
-
-[dependencies]
-"ecosystem::request" = "0.1.0"
