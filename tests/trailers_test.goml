@@ -1,0 +1,58 @@
+package tests;
+
+use ecosystem::request::{Client, ErrorKind};
+use std::testing;
+
+#[test]
+fn framing_and_routing_trailers_fail_in_buffered_and_streamed_http1() -> () {
+    for name in["Content-Length", "Transfer-Encoding", "Host"] {
+        for stream in[false, true] {
+            wire_response(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n" + name
+                    + ": 0\r\n\r\n",
+                |url| {
+                    let client = testing::expect_ok(Client::new(), "client");
+                    defer client.close();
+                    let result = if stream {
+                        client.get(url).send_stream(|response| streaming_text(response))
+                    } else {
+                        client.get(url).send().and_then(|response| response.text())
+                    };
+                    testing::assert_eq(
+                        testing::expect_err(result, "forbidden trailer").kind,
+                        ErrorKind::Transport,
+                    );
+                },
+            );
+        }
+    }
+}
+
+#[test]
+fn unknown_duplicate_trailers_remain_accepted_and_separate_from_headers() -> () {
+    for stream in[false, true] {
+        wire_response(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\nX-Check: one\r\nX-Check: two\r\n\r\n",
+            |url| {
+                let client = testing::expect_ok(Client::new(), "client");
+                defer client.close();
+                let result = if stream {
+                    client.get(url).send_stream(
+                        |response| {
+                            let text = streaming_text(response)?;
+                            testing::assert(
+                                response.trailers().get_all("x-check")
+                                    == Vec::from_array(["one", "two"]),
+                            );
+                            testing::assert(!response.headers().contains("x-check"));
+                            Result::Ok(text)
+                        },
+                    )
+                } else {
+                    client.get(url).send().and_then(|response| response.text())
+                };
+                testing::assert_eq(testing::expect_ok(result, "extensions"), "ok");
+            },
+        );
+    }
+}

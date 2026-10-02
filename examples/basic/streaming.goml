@@ -18,6 +18,8 @@ fn consume_stream(response: StreamingResponse) -> Result[string, Error] {
 pub fn streaming_exercise(base: string) -> () {
     let client = testing::expect_ok(Client::new(), "consumer stream client");
     defer client.close();
+    testing::assert(client.get(base + "/bad-trailer").send().is_err());
+    testing::assert(client.get(base + "/bad-trailer").send_stream(consume_stream).is_err());
     testing::assert_eq(
         testing::expect_ok(
             client.get(base + "/chunked").send_stream(consume_stream),

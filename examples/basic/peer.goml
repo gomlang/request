@@ -78,6 +78,12 @@ fn serve(socket: net::TcpStream) -> Result[(), io::Error] {
             "headers"
         },
         "/large" => "large-response",
+        "/bad-trailer" => {
+            socket.write_all(
+                b"HTTP/1.1 200 OK\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nHost: invalid\r\n\r\n".as_slice(),
+            )?;
+            return Result::Ok(())
+        },
         "/chunked" => {
             socket.write_all(
                 b"HTTP/1.1 200 OK\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n9 ; part=first\r\nchunk-one\r\n9;part=\"second chunk\"\r\nchunk-two\r\n0;done\r\n\r\n".as_slice(),

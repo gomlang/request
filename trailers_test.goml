@@ -1,0 +1,15 @@
+package request;
+
+use std::testing;
+
+#[test]
+fn http2_trailers_share_http1_framing_and_routing_rules() -> () {
+    for name in["content-length", "transfer-encoding", "host"] {
+        testing::assert(http2_response_headers(Vec::from_array([(name, "0")]), true).is_err());
+    }
+    let (_, headers) = testing::expect_ok(
+        http2_response_headers(Vec::from_array([("x-check", "one"), ("x-check", "two")]), true),
+        "extensions",
+    );
+    testing::assert(headers.get_all("x-check") == Vec::from_array(["one", "two"]));
+}
