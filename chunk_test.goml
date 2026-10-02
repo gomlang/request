@@ -1,0 +1,15 @@
+package request;
+
+use std::testing;
+
+#[test]
+fn chunk_size_bounds_and_last_chunk_extensions_are_validated() -> () {
+    testing::assert_eq(testing::expect_ok(chunk_size("000;final=ok"), "last chunk"), 0);
+    testing::assert_eq(
+        testing::expect_ok(chunk_size("7fffffffffffffff"), "maximum"),
+        9223372036854775807,
+    );
+    for value in["", "-1", "0x1", "8000000000000000", "0;bad=", "1;flag ", "1;flag\t", "1;;flag"] {
+        testing::assert(chunk_size(value).is_err());
+    }
+}

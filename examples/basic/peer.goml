@@ -80,7 +80,7 @@ fn serve(socket: net::TcpStream) -> Result[(), io::Error] {
         "/large" => "large-response",
         "/chunked" => {
             socket.write_all(
-                b"HTTP/1.1 200 OK\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n9\r\nchunk-one\r\n9\r\nchunk-two\r\n0\r\n\r\n".as_slice(),
+                b"HTTP/1.1 200 OK\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n9 ; part=first\r\nchunk-one\r\n9;part=\"second chunk\"\r\nchunk-two\r\n0;done\r\n\r\n".as_slice(),
             )?;
             return Result::Ok(())
         },

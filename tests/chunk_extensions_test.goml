@@ -1,0 +1,71 @@
+package tests;
+
+use ecosystem::request::{Client, ErrorKind};
+use std::testing;
+
+#[test]
+fn buffered_and_streaming_chunk_extensions_accept_rfc_tokens_and_quoted_values() -> () {
+    for extension in[
+        ";flag",
+        ";name=value",
+        " ; name = \"a; b\\\"c\\\\d\";flag",
+        ";empty=\"\"",
+        ";bytes=\"é\"",
+    ] {
+        for streaming in[false, true] {
+            wire_response(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2" + extension
+                    + "\r\nok\r\n0;end=yes\r\n\r\n",
+                |url| {
+                    let client = testing::expect_ok(Client::new(), "client");
+                    defer client.close();
+                    let result = if streaming {
+                        client.get(url).send_stream(|response| streaming_text(response))
+                    } else {
+                        client.get(url).send().and_then(|response| response.text())
+                    };
+                    testing::assert_eq(testing::expect_ok(result, "valid chunk extension"), "ok");
+                },
+            );
+        }
+    }
+}
+
+#[test]
+fn buffered_and_streaming_chunk_extensions_reject_malformed_ignored_metadata() -> () {
+    for extension in[
+        ";",
+        ";=bad",
+        ";name=",
+        ";name=bad value",
+        ";name=\"unterminated",
+        ";name=\"value\"junk",
+        ";name=\"bad\u0000value\"",
+        ";name=\"bad\\\u007f\"",
+        ";bad name=value",
+        " ",
+        ";name=value ",
+        ";name=é",
+        ";name=\"" + "a".repeat(8192) + "\"",
+    ] {
+        for streaming in[false, true] {
+            wire_response(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2" + extension
+                    + "\r\nok\r\n0\r\n\r\n",
+                |url| {
+                    let client = testing::expect_ok(Client::new(), "client");
+                    defer client.close();
+                    let result = if streaming {
+                        client.get(url).send_stream(|response| streaming_text(response))
+                    } else {
+                        client.get(url).send().and_then(|response| response.text())
+                    };
+                    testing::assert_eq(
+                        testing::expect_err(result, "invalid chunk extension").kind,
+                        ErrorKind::Transport,
+                    );
+                },
+            );
+        }
+    }
+}
