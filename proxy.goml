@@ -132,17 +132,22 @@ fn connect_tunnel_protocol(
     proxy_stream.write(connect.to_bytes().as_slice(), context)?;
     let reader = Reader::new(proxy_stream, context);
     let budget = Vec::from_array([client.options.max_headers]);
-    let line = reader.line(budget)?;
-    let parts = line.split(" ");
-    if parts.len() < 2 || parts[1].byte_len() != 3
-        || (parts[0] != "HTTP/1.1" && parts[0] != "HTTP/1.0") {
-        return Result::Err(transport_error("proxy CONNECT failed: " + line))
+    loop {
+        let line = reader.line(budget)?;
+        let parts = line.split(" ");
+        if parts.len() < 2 || parts[1].byte_len() != 3
+            || (parts[0] != "HTTP/1.1" && parts[0] != "HTTP/1.0") {
+            return Result::Err(transport_error("proxy CONNECT failed: " + line))
+        }
+        let status = decimal(parts[1])?;
+        if status < 100 || status == 101 || status >= 300 {
+            return Result::Err(transport_error("proxy CONNECT failed: " + line))
+        }
+        let _ = read_headers(reader, budget)?;
+        if status >= 200 {
+            break
+        }
     }
-    let status = decimal(parts[1])?;
-    if status < 200 || status >= 300 {
-        return Result::Err(transport_error("proxy CONNECT failed: " + line))
-    }
-    let _ = read_headers(reader, budget)?;
     if reader.positions[0] != reader.positions[1] {
         return Result::Err(transport_error("unexpected bytes before proxy TLS handshake"))
     }

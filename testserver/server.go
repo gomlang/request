@@ -195,6 +195,18 @@ func StartProxy(secure bool) Server {
 }
 
 func StartProxyStatus(secure bool, status int) Server {
+	return startProxy(secure, status, "")
+}
+
+func StartProxyInformational(secure bool, interim, final, count int) Server {
+	var prefix strings.Builder
+	for range count {
+		prefix.WriteString("HTTP/1.1 " + strconv.Itoa(interim) + " Informational\r\nX-Interim: yes\r\n\r\n")
+	}
+	return startProxy(secure, final, prefix.String())
+}
+
+func startProxy(secure bool, status int, prefix string) Server {
 	transport := &http.Transport{DisableKeepAlives: true}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "CONNECT" {
@@ -209,7 +221,7 @@ func StartProxyStatus(secure bool, status int) Server {
 				return
 			}
 			defer local.Close()
-			io.WriteString(local, "HTTP/1.1 "+strconv.Itoa(status)+" Connection Established\r\n\r\n")
+			io.WriteString(local, prefix+"HTTP/1.1 "+strconv.Itoa(status)+" Connection Established\r\n\r\n")
 			done := make(chan struct{})
 			go func() {
 				io.Copy(remote, local)

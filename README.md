@@ -332,8 +332,10 @@ disabled, request header encoding uses literals without dynamic indexing, and
 priority hints do not alter the round-robin upload scheduler. HTTP/1.1 connections
 are reused and idle age is checked when checking a connection out of the pool. Client-side file
 reading is separate from multipart byte parts. HTTP and HTTPS forward proxies
-and CONNECT tunnels are implemented in GoML. CONNECT accepts successful 2xx
-responses and uses a lifecycle-managed loopback relay so the standard TLS client
+and CONNECT tunnels are implemented in GoML. CONNECT skips informational 1xx
+responses (except unsupported 101 upgrades) before accepting a final 2xx
+response; all response heads share the configured header byte budget.
+It uses a lifecycle-managed loopback relay so the standard TLS client
 can verify the original target hostname.
 Proxy credentials use the Proxy-Authorization header; credentials embedded in
 proxy URLs are rejected. Environment proxy bypass supports hosts, suffixes,

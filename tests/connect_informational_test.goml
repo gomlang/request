@@ -1,0 +1,81 @@
+package tests;
+
+use ecosystem::request::{Client, ErrorKind};
+use std::testing;
+
+#[test]
+fn connect_informational_responses_precede_the_final_tunnel_status() -> () {
+    let origin = start(true, false);
+    defer close(origin);
+    for status in[100, 102, 103, 199] {
+        let proxy = start_proxy_informational(false, status, 201, 2);
+        defer close(proxy);
+        let client = testing::expect_ok(
+            Client::builder().proxy(url(proxy)).add_root_certificate(certificate(origin)).build(),
+            "client",
+        );
+        defer client.close();
+        testing::assert_eq(
+            testing::expect_ok(
+                client.get(url(origin)).send().and_then(|response| response.text()),
+                "buffered tunnel after informational responses",
+            ),
+            "ok",
+        );
+        testing::assert_eq(
+            testing::expect_ok(
+                client.get(url(origin)).send_stream(|response| streaming_text(response)),
+                "streaming tunnel after informational responses",
+            ),
+            "ok",
+        );
+    }
+}
+
+#[test]
+fn connect_informational_responses_do_not_hide_errors_or_protocol_switches() -> () {
+    let origin = start(true, false);
+    defer close(origin);
+    for (interim, final, rejected) in[(103, 407, "407"), (101, 200, "101"), (99, 200, "99")] {
+        let proxy = start_proxy_informational(false, interim, final, 1);
+        defer close(proxy);
+        let client = testing::expect_ok(
+            Client::builder().proxy(url(proxy)).add_root_certificate(certificate(origin)).build(),
+            "client",
+        );
+        defer client.close();
+        let error = testing::expect_err(client.get(url(origin)).send(), "failed CONNECT");
+        testing::assert_eq(error.kind, ErrorKind::Transport);
+        testing::assert(error.message.contains(rejected));
+        let error = testing::expect_err(
+            client.get(url(origin)).send_stream(|response| streaming_text(response)),
+            "failed streaming CONNECT",
+        );
+        testing::assert_eq(error.kind, ErrorKind::Transport);
+        testing::assert(error.message.contains(rejected));
+    }
+}
+
+#[test]
+fn connect_informational_responses_share_one_header_budget() -> () {
+    let origin = start(true, false);
+    defer close(origin);
+    let proxy = start_proxy_informational(false, 103, 200, 4);
+    defer close(proxy);
+    let client = testing::expect_ok(
+        Client::builder().proxy(url(proxy)).max_header_bytes(128).add_root_certificate(
+            certificate(origin),
+        ).build(),
+        "bounded client",
+    );
+    defer client.close();
+    let error = testing::expect_err(client.get(url(origin)).send(), "informational header budget");
+    testing::assert_eq(error.kind, ErrorKind::Transport);
+    testing::assert(error.message.contains("limit"));
+    let error = testing::expect_err(
+        client.get(url(origin)).send_stream(|response| streaming_text(response)),
+        "streaming informational header budget",
+    );
+    testing::assert_eq(error.kind, ErrorKind::Transport);
+    testing::assert(error.message.contains("limit"));
+}
