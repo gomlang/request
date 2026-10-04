@@ -173,6 +173,7 @@ fn http2_receive_headers(
             return Result::Ok(())
         },
     };
+    stream.response_started = true;
     let ended = frame.flags & 1 != 0;
     if stream.status == 0 && code < 200 {
         if ended {
@@ -305,7 +306,7 @@ fn http2_receive_reset(connection: Http2Connection, frame: Http2Frame) -> Result
     if let Some(index) = http2_stream_index(state, frame.stream) {
         let code = http2_integer(frame.payload, 0, 4);
         let error = transport_error("HTTP/2 peer reset stream: " + code.to_string());
-        let failure = if code == 7 && state.streams[index].status == 0 {
+        let failure = if code == 7 && !state.streams[index].response_started {
             Http2Failure::Retry(error)
         } else {
             Http2Failure::Failed(error)
@@ -333,7 +334,7 @@ fn http2_receive_goaway(connection: Http2Connection, frame: Http2Frame) -> Resul
     while index < state.streams.len() {
         let stream = state.streams[index];
         if stream.id > last || !stream.headers_sent {
-            let failure = if stream.status != 0 {
+            let failure = if stream.response_started {
                 Http2Failure::Failed(transport_error("HTTP/2 GOAWAY contradicts response headers"))
             } else {
                 Http2Failure::Retry(transport_error("HTTP/2 GOAWAY rejected stream"))

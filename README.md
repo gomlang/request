@@ -273,7 +273,11 @@ A graceful GOAWAY drains accepted streams while new requests use another
 connection. Buffered requests rejected by GOAWAY, refused before response headers
 with REFUSED_STREAM, or still queued when a connection fails are replayed at most
 twice. Requests that might already have been processed are not automatically
-retried. These protocol retries remain within the original request deadline.
+retried. Any response headers, including informational 1xx responses, prevent
+replay if a later REFUSED_STREAM or GOAWAY contradicts that response. This
+preserves the unprocessed-request guarantee described in
+[RFC 9113 section 8.7](https://www.rfc-editor.org/rfc/rfc9113.html#section-8.7).
+These protocol retries remain within the original request deadline.
 
 ## Cancellation, redirects and TLS
 

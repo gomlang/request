@@ -1,0 +1,147 @@
+package request;
+
+use ecosystem::request::trace::{Trace, EventKind};
+use std::bytes::{Bytes, FrozenBytes};
+use std::testing;
+
+fn http2_refused_response_case(status: isize) -> () {
+    let observed: Channel[isize] = Channel::new(1);
+    multiplex_peer(
+        |reader, stream, context| {
+            let mut requests = 0;
+            defer observed.send(requests);
+            http2_write(stream, context, 4, 0, 0, Bytes::new().as_slice())?;
+            loop {
+                let frame = match http2_read(reader) {
+                    Ok(frame) => frame,
+                    Err(_) => return Result::Ok(()),
+                };
+                if frame.kind == 4 {
+                    continue
+                }
+                testing::assert_eq(frame.kind, 1);
+                testing::assert_eq(frame.stream, requests * 2 + 1);
+                let fields = Hpack::new().decode(frame.payload, 8192)?;
+                testing::assert(fields.contains((":method", "POST")));
+                let body = Bytes::new();
+                loop {
+                    let data = http2_read(reader)?;
+                    if data.kind == 4 {
+                        continue
+                    }
+                    testing::assert_eq(data.kind, 0);
+                    testing::assert_eq(data.stream, frame.stream);
+                    body.extend_from_slice(data.payload.as_slice());
+                    if data.flags & 1 != 0 {
+                        break
+                    }
+                }
+                testing::assert(body.to_vec() == b"charge-once");
+                requests += 1;
+                if requests == 1 {
+                    if status != 0 {
+                        http2_write(
+                            stream,
+                            context,
+                            1,
+                            4,
+                            frame.stream,
+                            hpack_encode(Vec::from_array([(":status", status.to_string())])).as_slice(),
+                        )?;
+                    }
+                    http2_write(stream, context, 3, 0, frame.stream, http2_number(7).as_slice())?;
+                } else {
+                    http2_write(stream, context, 1, 5, frame.stream, b"\x88".as_slice())?;
+                }
+            }
+        },
+        |connection, context| {
+            let trace = testing::expect_some(Trace::new(64), "retry trace");
+            let client = testing::expect_ok(
+                Client::builder().no_proxy().trace(trace).build(),
+                "retry client",
+            );
+            defer client.close();
+            let url = testing::expect_ok(Url::parse("https://example.test/charge"), "retry URL");
+            retry_pool(client, url, connection);
+            let response = client.post(url.to_string()).text("charge-once").send_with(context);
+            client.close();
+            testing::assert_eq(
+                testing::expect_some(observed.recv(), "observed POST count"),
+                if status == 0 {
+                    2
+                } else {
+                    1
+                },
+            );
+            let events = trace.drain();
+            let mut retries = 0;
+            for event in events {
+                testing::assert_eq(event.request_id, events[0].request_id);
+                testing::assert_eq(event.attempt, 0);
+                if event.kind == EventKind::Retry {
+                    retries += 1;
+                }
+            }
+            if status == 0 {
+                testing::assert_eq(
+                    testing::expect_ok(response, "unprocessed retry").status().as_isize(),
+                    200,
+                );
+                testing::assert_eq(retries, 1);
+                testing::assert_eq(events[events.len() - 1].kind, EventKind::RequestDone);
+            } else {
+                testing::assert_eq(
+                    testing::expect_err(response, "response forbids replay").kind,
+                    ErrorKind::Transport,
+                );
+                testing::assert_eq(retries, 0);
+                testing::assert_eq(events[events.len() - 1].kind, EventKind::RequestFailed);
+            }
+        },
+    );
+}
+
+#[test]
+fn http2_refused_stream_after_response_does_not_replay_buffered_post() -> () {
+    for status in Vec::from_array([100, 103, 199, 200, 0]) {
+        http2_refused_response_case(status);
+    }
+}
+
+#[test]
+fn http2_goaway_after_response_does_not_retry_and_preserves_accepted_stream() -> () {
+    for status in Vec::from_array([100, 103, 199, 200]) {
+        multiplex_peer(
+            |reader, stream, context| {
+                http2_write(stream, context, 4, 0, 0, Bytes::new().as_slice())?;
+                testing::assert(multiplex_headers(reader, 2)? == Vec::from_array([1, 3]));
+                http2_write(
+                    stream,
+                    context,
+                    1,
+                    4,
+                    3,
+                    hpack_encode(Vec::from_array([(":status", status.to_string())])).as_slice(),
+                )?;
+                let payload = http2_number(1);
+                payload.extend_from_slice(http2_number(0).as_slice());
+                http2_write(stream, context, 7, 0, 0, payload.as_slice())?;
+                http2_write(stream, context, 1, 5, 1, b"\x88".as_slice())
+            },
+            |connection, context| {
+                let accepted = multiplex_request(connection, "GET", FrozenBytes::new());
+                let rejected = multiplex_request(connection, "POST", FrozenBytes::new());
+                let result = http2_await(rejected, context);
+                testing::assert_eq(multiplex_response(accepted, context).status, 200);
+                match result {
+                    Err(Http2Failure::Failed(error)) => testing::assert_eq(
+                        error.kind,
+                        ErrorKind::Transport,
+                    ),
+                    _ => testing::fail("GOAWAY cannot mark a response-bearing stream unprocessed"),
+                }
+            },
+        );
+    }
+}
