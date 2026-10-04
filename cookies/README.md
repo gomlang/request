@@ -25,3 +25,9 @@ Repeated Expires and Path attributes follow [RFC 6265 sections 5.2 and 5.3](http
 the last valid Expires date wins, while an invalid date is ignored. The last Path
 attribute wins; an empty or relative value selects the request's default path.
 Max-Age continues to take precedence over Expires.
+
+`cookie_date` parses Expires with the token algorithm in
+[RFC 6265 section 5.1.1](https://www.rfc-editor.org/rfc/rfc6265.html#section-5.1.1),
+including its delimiter set, flexible field order and numeric width limits,
+with the optional suffixes clarified by [verified erratum 4148](https://www.rfc-editor.org/errata/eid4148).
+The first matching token supplies each component; invalid calendar dates fail.

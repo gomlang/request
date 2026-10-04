@@ -1,0 +1,85 @@
+package tests;
+
+use ecosystem::request::cookies;
+use std::testing;
+
+#[test]
+fn cookie_date_tokens_accept_delimiters_order_and_suffixes() -> () {
+    for value in[
+        "Sun,\t06\tNov\t1994\t08:49:37\tGMT",
+        "Sun/06/Nov/1994/08:49:37/GMT",
+        "08:49:37 06 Nov 1994",
+        "1994 Nov 06 08:49:37",
+        "Sun, 06th November 1994year 08:49:37GMT",
+        "[06]{Nov}(1994)@08:49:37",
+        "06 Nov 94 8:49:37",
+    ] {
+        testing::assert_eq(cookies::cookie_date(value).unwrap_or(-1), 784111777);
+    }
+}
+
+#[test]
+fn cookie_date_tokens_reject_invalid_numeric_widths_and_calendar_dates() -> () {
+    let accepted: Vec[string] = Vec::new();
+    for value in[
+        "Sun, 006 Nov 1994 08:49:37 GMT",
+        "Sun, 06 Nov 4 08:49:37 GMT",
+        "Sun, 06 Nov 00094 08:49:37 GMT",
+        "Sun, 06 Nov 1994 008:49:37 GMT",
+        "Sun, 06 Nov 1994 08:049:37 GMT",
+        "Sun, 06 Nov 1994 08:49:037 GMT",
+        "31 Nov 1994 08:49:37",
+        "29 Feb 2023 08:49:37",
+        "06 Nov 1600 08:49:37",
+        "06 Nov 1994 24:00:00",
+        "06 Nov 1994 08:60:00",
+        "06 Nov 1994 08:49:60",
+        "Nov 1994 08:49:37",
+        "06 1994 08:49:37",
+        "06 Nov 08:49:37",
+        "06 Nov 1994",
+    ] {
+        if cookies::cookie_date(value).is_some() {
+            accepted.push(value);
+        }
+    }
+    testing::assert_eq(accepted.join(","), "");
+}
+
+#[test]
+fn cookie_date_tokens_use_first_components_and_adjust_two_digit_years() -> () {
+    testing::assert_eq(
+        cookies::cookie_date("06 Nov 1994 08:49:37 07 Dec 1995 09:50:38").unwrap_or(-1),
+        784111777,
+    );
+    testing::assert(cookies::cookie_date("00 Nov 1994 08:49:37 06").is_none());
+    testing::assert(cookies::cookie_date("06 Nov 1994 24:49:37 08:49:37").is_none());
+    for (short, full) in[("00", "2000"), ("69", "2069"), ("70", "1970"), ("99", "1999")] {
+        testing::assert_eq(
+            cookies::cookie_date("01 Jan " + short + " 00:00:00").unwrap_or(-1),
+            testing::expect_some(cookies::cookie_date("01 Jan " + full + " 00:00:00"), "full year"),
+        );
+    }
+    testing::assert(cookies::cookie_date("29 Feb 2000 00:00:00").is_some());
+    testing::assert(cookies::cookie_date("29 Feb 1900 00:00:00").is_none());
+}
+
+#[test]
+fn cookie_date_tokens_expire_cookies_and_preserve_max_age_precedence() -> () {
+    let jar = testing::expect_some(cookies::Jar::new(), "jar");
+    for date in["01/Jan/1970/00:03:00", "1970 Jan 01 00:03:00", "01\tJan\t1970\t00:03:00"] {
+        let stored = jar.set("example.com", "/", "session=live; Expires=" + date, 100);
+        testing::assert_eq(stored.header("example.com", "/", false, 179).1, "session=live");
+        testing::assert_eq(stored.header("example.com", "/", false, 180).1, "");
+        let replaced = stored.set("example.com", "/", "session=gone; Expires=" + date, 180);
+        testing::assert_eq(replaced.len(), 0);
+        let max_age = jar.set(
+            "example.com",
+            "/",
+            "session=live; Expires=" + date + "; Max-Age=200",
+            100,
+        );
+        testing::assert_eq(max_age.header("example.com", "/", false, 299).1, "session=live");
+        testing::assert_eq(max_age.header("example.com", "/", false, 300).1, "");
+    }
+}

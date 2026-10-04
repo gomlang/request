@@ -15,76 +15,93 @@ fn decimal(value: string) -> Option[isize] {
     Option::Some(result)
 }
 
+fn date_delimiter(value: byte) -> bool {
+    value == 9 || value >= 32 && value <= 47 || value >= 59 && value <= 64
+        || value >= 91 && value <= 96
+        || value >= 123 && value <= 126
+}
+
+fn date_number(value: string, minimum: isize, maximum: isize) -> Option[isize] {
+    let mut end = 0;
+    while end < value.byte_len() && value.byte_get(end) >= b'0' && value.byte_get(end) <= b'9' {
+        end += 1;
+    }
+    if end < minimum || end > maximum {
+        return Option::None
+    }
+    decimal(value.byte_slice(0, end))
+}
+
+fn date_clock(value: string) -> Option[(isize, isize, isize)] {
+    let (hour, remainder) = value.split_once(":")?;
+    let (minute, second) = remainder.split_once(":")?;
+    if hour.byte_len() > 2 || minute.byte_len() > 2 {
+        return Option::None
+    }
+    Option::Some((decimal(hour)?, decimal(minute)?, date_number(second, 1, 2)?))
+}
+
 pub fn cookie_date(value: string) -> Option[i64] {
-    let fields = value.replace(",", " ").replace("-", " ").split(" ");
-    let parts: Vec[string] = Vec::new();
-    for field in fields {
-        if field != "" {
-            parts.push(field);
-        }
-    }
-    if parts.len() < 5 {
-        return Option::None
-    }
-    let offset = if decimal(parts[0]).is_some() {
-        0
-    } else {
-        1
-    };
-    if parts.len() < offset + 4 {
-        return Option::None
-    }
-    let asctime = decimal(parts[offset]).is_none();
-    let day = decimal(
-        parts[offset
-            + if asctime {
-                1
-            } else {
-                0
-            }],
-    )?;
-    let month_name = lower_ascii(
-        parts[offset
-            + if asctime {
-                0
-            } else {
-                1
-            }],
-    );
+    let mut day = Option::None;
+    let mut month = Option::None;
+    let mut year = Option::None;
+    let mut clock = Option::None;
     let months = Vec::from_array(
         ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"],
     );
-    let mut month = 0;
-    for index in 0..months.len() {
-        if months[index] == month_name {
-            month = index + 1;
+    let mut cursor = 0;
+    while cursor < value.byte_len() {
+        if date_delimiter(value.byte_get(cursor)) {
+            cursor += 1;
+            continue
+        }
+        let start = cursor;
+        while cursor < value.byte_len() && !date_delimiter(value.byte_get(cursor)) {
+            cursor += 1;
+        }
+        let token = value.byte_slice(start, cursor);
+        // RFC 6265 section 5.1.1 gives time, day, month, then year priority.
+        // Each component is taken from its first matching token.
+        if clock.is_none() {
+            if let Some(parsed) = date_clock(token) {
+                clock = Option::Some(parsed);
+                continue
+            }
+        }
+        if day.is_none() {
+            if let Some(parsed) = date_number(token, 1, 2) {
+                day = Option::Some(parsed);
+                continue
+            }
+        }
+        if month.is_none() {
+            let name = lower_ascii(token);
+            for index in 0..months.len() {
+                if name.starts_with(months[index]) {
+                    month = Option::Some(index + 1);
+                    break
+                }
+            }
+            if month.is_some() {
+                continue
+            }
+        }
+        if year.is_none() {
+            year = date_number(token, 2, 4);
         }
     }
-    let mut year = decimal(
-        parts[offset
-            + if asctime {
-                3
-            } else {
-                2
-            }],
-    )?;
+    let day = day?;
+    let month = month?;
+    let mut year = year?;
+    let (hour, minute, second) = clock?;
     if year < 70 {
         year += 2000;
     } else if year < 100 {
         year += 1900;
     }
-    let clock = parts[offset
-        + if asctime {
-            2
-        } else {
-            3
-        }].split(":");
-    if clock.len() != 3 || month == 0 || year < 1601 || year > 9999 || day < 1 || day > 31 {
+    if year < 1601 || day < 1 || day > 31 {
         return Option::None
     }
-    let hour = decimal(clock[0])?;
-    let minute = decimal(clock[1])?;
-    let second = decimal(clock[2])?;
     if hour > 23 || minute > 59 || second > 59 {
         return Option::None
     }
