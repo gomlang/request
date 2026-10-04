@@ -298,6 +298,7 @@ impl Client {
         let trace_id = self.options.trace_value.map(
             |value| value.begin(request.method_value, request.url_value.text),
         ).unwrap_or(0);
+        let trace_attempt = self.options.trace_value.map(|_| Ref::new(0));
         let result = context::with_timeout(
             context,
             request.timeout_value,
@@ -312,7 +313,7 @@ impl Client {
                                 recv(done) as _ => (),
                             },
                         );
-                        let result = execute_loop(self, request, control, trace_id);
+                        let result = execute_loop(self, request, control, trace_id, trace_attempt);
                         match result {
                             Err(error) => if self.is_closed() {
                                 Result::Err(Error::new(ErrorKind::Closed, "client is closed"))
@@ -350,7 +351,7 @@ impl Client {
             Err(error) => trace_event(
                 self,
                 trace_id,
-                0,
+                trace_attempt.map(|attempt| attempt.get()).unwrap_or(0),
                 trace::EventKind::RequestFailed,
                 error.message,
                 Option::None,
@@ -397,16 +398,22 @@ fn redirect_without_content(headers: Headers) -> Headers {
     ).remove("content-md5")
 }
 
-fn execute_loop(client: Client, request: Request, control: context::Context, trace_id: i64) -> Result[
-    Response,
-    Error,
-] {
+fn execute_loop(
+    client: Client,
+    request: Request,
+    control: context::Context,
+    trace_id: i64,
+    trace_attempt: Option[Ref[isize]],
+) -> Result[Response, Error] {
     let mut url = request.url_value;
     let mut method = request.method_value;
     let mut headers = request.headers_value;
     let mut body = request.body_value;
     let history: Vec[Url] = Vec::new();
     loop {
+        if let Some(attempt) = trace_attempt {
+            attempt.set(history.len());
+        }
         if client.options.https && !url.is_https() {
             return Result::Err(Error::new(ErrorKind::Builder, "client requires HTTPS"))
         }

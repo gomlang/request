@@ -33,6 +33,9 @@ does not increment `attempt`. `elapsed` is measured from creation of the trace,
 not from the request start. `RequestDone` and `RequestFailed` mark the final
 outcome, including redirects. HTTP status errors are successful transport
 responses until the caller explicitly invokes `error_for_status()`.
+Final events keep the last attempted redirect hop, including streaming callback
+errors and redirect-limit failures; a redirect that is not followed does not
+increment the hop.
 
 Connection attempts emit `ConnectStart` and `ConnectDone`. `Connection` says
 whether an established HTTP/1.1 or HTTP/2 connection was reused. HTTP/1.1

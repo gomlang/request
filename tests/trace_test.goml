@@ -1,7 +1,8 @@
 package tests;
 
-use ecosystem::request::{Client};
+use ecosystem::request::{Client, Error, ErrorKind, RedirectPolicy};
 use ecosystem::request::trace::{Trace, EventKind, Event};
+use std::io;
 use std::testing;
 
 fn event_index(events: Vec[Event], kind: EventKind) -> isize {
@@ -97,4 +98,130 @@ fn trace_records_final_failure_after_a_bounded_response() -> () {
     testing::assert(event_index(events, EventKind::ResponseReceived) > 0);
     testing::assert(event_index(events, EventKind::ResponseReceived) < events.len() - 1);
     testing::assert_eq(event_index(events, EventKind::RequestDone), -1);
+}
+
+fn redirected_trace_outcome(api: isize, outcome: isize) -> () {
+    let server = start(false, false);
+    defer close(server);
+    let trace = testing::expect_some(Trace::new(64), "redirect trace");
+    let client = testing::expect_ok(Client::builder().trace(trace).build(), "trace client");
+    defer client.close();
+    // Outcomes: success, body limit, redirect limit, callback error, zero redirects.
+    let hops_expected = if outcome == 4 {
+        0
+    } else {
+        2
+    };
+    let request = if outcome == 2 || outcome == 4 {
+        client.get(url(server) + "/loop").redirect(RedirectPolicy::Limited(hops_expected))
+    } else {
+        client.get(url(server) + "/redirect").query(
+            Vec::from_array(
+                [
+                    (
+                        "to",
+                        if outcome == 1 {
+                            "/redirect?to=/large"
+                        } else {
+                            "/redirect?to=/headers"
+                        },
+                    ),
+                ],
+            ),
+        ).body_limit(
+            if outcome == 1 {
+                2
+            } else {
+                1024
+            },
+        )
+    };
+    let consume = |response| {
+        if outcome == 3 {
+            Result::Err(Error::new(ErrorKind::Decode, "callback failure"))
+        } else {
+            streaming_text(response)
+        }
+    };
+    let result = if api == 0 {
+        request.send().map(|_| ())
+    } else if api == 1 {
+        request.send_stream(consume).map(|_| ())
+    } else {
+        request.send_reader(io::StringReader::new(""), Option::Some(0), consume).map(|_| ())
+    };
+    if outcome == 0 {
+        testing::assert_ok(result);
+    } else {
+        testing::assert_eq(
+            testing::expect_err(result, "redirected failure").kind,
+            if outcome == 1 {
+                ErrorKind::BodyLimit
+            } else if outcome == 3 {
+                ErrorKind::Decode
+            } else {
+                ErrorKind::Redirect
+            },
+        );
+    }
+    let events = trace.drain();
+    let mut hops = 0;
+    let mut terminals = 0;
+    for event in events {
+        testing::assert_eq(event.request_id, events[0].request_id);
+        if event.kind == EventKind::Redirect {
+            testing::assert_eq(event.attempt, hops);
+            hops += 1;
+        }
+        if event.kind == EventKind::RequestDone || event.kind == EventKind::RequestFailed {
+            terminals += 1;
+        }
+    }
+    testing::assert_eq(hops, hops_expected);
+    testing::assert_eq(terminals, 1);
+    let final_event = events[events.len() - 1];
+    testing::assert_eq(final_event.attempt, hops_expected);
+    testing::assert_eq(
+        final_event.kind,
+        if outcome == 0 {
+            EventKind::RequestDone
+        } else {
+            EventKind::RequestFailed
+        },
+    );
+}
+
+#[test]
+fn trace_final_success_keeps_redirect_hop_for_all_send_apis() -> () {
+    for api in 0..3 {
+        redirected_trace_outcome(api, 0);
+    }
+}
+
+#[test]
+fn trace_final_body_failure_keeps_redirect_hop_for_all_send_apis() -> () {
+    for api in 0..3 {
+        redirected_trace_outcome(api, 1);
+    }
+}
+
+#[test]
+fn trace_final_redirect_failure_keeps_redirect_hop_for_all_send_apis() -> () {
+    for api in 0..3 {
+        redirected_trace_outcome(api, 2);
+    }
+}
+
+#[test]
+fn trace_final_callback_failure_keeps_redirect_hop() -> () {
+    for api in 1..3 {
+        redirected_trace_outcome(api, 3);
+    }
+}
+
+#[test]
+fn trace_final_redirect_failure_before_following_stays_on_original_hop() -> () {
+    for api in 0..3 {
+        redirected_trace_outcome(api, 4);
+    }
 }

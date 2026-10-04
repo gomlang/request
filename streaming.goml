@@ -755,6 +755,7 @@ fn streaming_loop(
     length: Option[isize],
     control: context::Context,
     trace_id: i64,
+    trace_attempt: Option[Ref[isize]],
     consume: (StreamingResponse) -> Result[(), Error],
 ) -> Result[(), Error] {
     let mut current = StreamingRequestState {
@@ -765,6 +766,9 @@ fn streaming_loop(
         history: Vec::new(),
     };
     loop {
+        if let Some(attempt) = trace_attempt {
+            attempt.set(current.history.len());
+        }
         match streaming_hop(
             client,
             request,
@@ -808,6 +812,7 @@ fn streaming_execute_erased(
     let trace_id = client.options.trace_value.map(
         |value| value.begin(request.method_value, request.url_value.text),
     ).unwrap_or(0);
+    let trace_attempt = client.options.trace_value.map(|_| Ref::new(0));
     let result = context::with_timeout(
         parent,
         request.timeout_value,
@@ -829,6 +834,7 @@ fn streaming_execute_erased(
                     length,
                     control,
                     trace_id,
+                    trace_attempt,
                     consume,
                 );
                 if client.is_closed() {
@@ -840,11 +846,12 @@ fn streaming_execute_erased(
             },
         ),
     );
+    let attempt = trace_attempt.map(|value| value.get()).unwrap_or(0);
     match result {
         Ok(_) => trace_event(
             client,
             trace_id,
-            0,
+            attempt,
             trace::EventKind::RequestDone,
             "stream",
             Option::None,
@@ -854,7 +861,7 @@ fn streaming_execute_erased(
         Err(error) => trace_event(
             client,
             trace_id,
-            0,
+            attempt,
             trace::EventKind::RequestFailed,
             error.message,
             Option::None,
