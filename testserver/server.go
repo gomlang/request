@@ -86,6 +86,14 @@ func Start(secure, mutual bool) Server {
 		case "/loop":
 			w.Header().Set("Location", "/loop")
 			w.WriteHeader(302)
+		case "/gzip-no-content", "/gzip-not-modified":
+			w.Header().Set("Content-Encoding", "gzip")
+			w.Header().Set("ETag", `"encoded"`)
+			if r.URL.Path == "/gzip-no-content" {
+				w.WriteHeader(http.StatusNoContent)
+			} else {
+				w.WriteHeader(http.StatusNotModified)
+			}
 		case "/gzip", "/gzip-small", "/gzip-empty":
 			w.Header().Set("Content-Encoding", "gzip")
 			z := gzip.NewWriter(w)

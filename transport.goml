@@ -498,7 +498,8 @@ fn finish_response(
     if client.options.cookies {
         store_cookies(client, url, response.headers);
     }
-    if decompress
+    let has_body = response.status != 204 && response.status != 304;
+    if decompress && has_body
         && response.headers.get("content-encoding").map(ascii_lower) == Option::Some("gzip") {
         let decoded = archive::gunzip(response.body.thaw(), limit).map_err(
             |error| if error.kind == archive::ErrorKind::Limit {

@@ -1,0 +1,88 @@
+package tests;
+
+use ecosystem::request::{Client};
+use std::testing;
+
+#[test]
+fn gzip_metadata_on_no_content_does_not_require_a_compressed_body() -> () {
+    wire_response(
+        "HTTP/1.1 204 No Content\r\nContent-Encoding: gzip\r\nETag: \"new\"\r\nConnection: close\r\n\r\n",
+        |url| {
+            let client = testing::expect_ok(Client::new(), "client");
+            defer client.close();
+            let response = testing::expect_ok(client.get(url).body_limit(0).send(), "204 metadata");
+            testing::assert_eq(response.status().as_isize(), 204);
+            testing::assert_eq(response.content_length(), 0);
+            testing::assert_eq(response.headers().get("content-encoding").unwrap_or(""), "gzip");
+            testing::assert_eq(response.headers().get("etag").unwrap_or(""), "\"new\"");
+        },
+    );
+}
+
+#[test]
+fn gzip_metadata_on_not_modified_preserves_representation_headers() -> () {
+    wire_response(
+        "HTTP/1.1 304 Not Modified\r\nContent-Encoding: gzip\r\nContent-Length: 4096\r\nETag: \"cached\"\r\nConnection: close\r\n\r\n",
+        |url| {
+            let client = testing::expect_ok(Client::new(), "client");
+            defer client.close();
+            let response = testing::expect_ok(
+                client.get(url).header("if-none-match", "\"cached\"").body_limit(0).send(),
+                "304 metadata",
+            );
+            testing::assert_eq(response.status().as_isize(), 304);
+            testing::assert_eq(response.content_length(), 0);
+            testing::assert_eq(response.headers().get("content-encoding").unwrap_or(""), "gzip");
+            testing::assert_eq(response.headers().get("content-length").unwrap_or(""), "4096");
+            testing::assert_eq(response.headers().get("etag").unwrap_or(""), "\"cached\"");
+        },
+    );
+}
+
+#[test]
+fn http2_bodyless_responses_preserve_gzip_metadata() -> () {
+    let server = start(true, false);
+    defer close(server);
+    let client = testing::expect_ok(
+        Client::builder().add_root_certificate(certificate(server)).build(),
+        "HTTP/2 client",
+    );
+    defer client.close();
+    for (path, status) in[("/gzip-no-content", 204), ("/gzip-not-modified", 304)] {
+        let response = testing::expect_ok(
+            client.get(url(server) + path).body_limit(0).send(),
+            "HTTP/2 gzip metadata",
+        );
+        testing::assert_eq(response.version(), "HTTP/2.0");
+        testing::assert_eq(response.status().as_isize(), status);
+        testing::assert_eq(response.content_length(), 0);
+        testing::assert_eq(response.headers().get("content-encoding").unwrap_or(""), "gzip");
+        testing::assert_eq(response.headers().get("etag").unwrap_or(""), "\"encoded\"");
+    }
+}
+
+#[test]
+fn missing_gzip_payload_still_fails_when_a_response_can_have_content() -> () {
+    wire_response(
+        "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        |url| {
+            let client = testing::expect_ok(Client::new(), "client");
+            defer client.close();
+            testing::expect_err(client.get(url).send(), "missing gzip member");
+        },
+    );
+    wire_response(
+        "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 4096\r\nConnection: close\r\n\r\n",
+        |url| {
+            let client = testing::expect_ok(Client::new(), "client");
+            defer client.close();
+            let response = testing::expect_ok(
+                client.head(url).body_limit(0).send(),
+                "HEAD metadata",
+            );
+            testing::assert_eq(response.content_length(), 0);
+            testing::assert_eq(response.headers().get("content-encoding").unwrap_or(""), "gzip");
+            testing::assert_eq(response.headers().get("content-length").unwrap_or(""), "4096");
+        },
+    );
+}

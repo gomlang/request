@@ -237,6 +237,8 @@ length because it has no response body. Redirect response bodies have the same
 per-hop limit. An oversized body fails instead of returning a truncated success.
 Automatic gzip permits a bounded wire buffer of the body budget plus 64 KiB
 and 0.1% framing overhead before enforcing the decompressed body budget.
+HEAD, 204 and 304 responses preserve encoding metadata without attempting to
+decode a body, following [RFC 9110 section 6.4.1](https://www.rfc-editor.org/rfc/rfc9110.html#section-6.4.1).
 Request limits are checked before network I/O; ordinary bodies are already
 caller-owned buffers. Zero body limits are valid; zero timeouts, negative limits
 and negative redirect counts are errors.
