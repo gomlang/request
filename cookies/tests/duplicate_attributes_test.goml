@@ -1,0 +1,54 @@
+package tests;
+
+use ecosystem::request::cookies;
+use std::testing;
+
+#[test]
+fn duplicate_expires_ignores_invalid_dates_and_uses_the_last_valid_date() -> () {
+    let empty = testing::expect_some(cookies::Jar::new(), "jar");
+    let old = empty.set("example.com", "/", "session=old", 100);
+    for invalid in["", "not-a-date", "Fri, 31 Feb 2023 00:00:00 GMT"] {
+        let jar = old.set(
+            "example.com",
+            "/",
+            "session=deleted; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Expires=" + invalid,
+            100,
+        );
+        testing::assert_eq(jar.header("example.com", "/", false, 100).1, "");
+        testing::assert_eq(jar.len(), 0);
+    }
+    for attributes in[
+        "Expires=invalid; Expires=Thu, 01 Jan 1970 00:03:00 GMT",
+        "Expires=Thu, 01 Jan 1970 00:02:00 GMT; Expires=Thu, 01 Jan 1970 00:03:00 GMT",
+        "Expires=Thu, 01 Jan 1970 00:03:00 GMT; Expires=invalid",
+    ] {
+        let jar = empty.set("example.com", "/", "session=live; " + attributes, 100);
+        testing::assert_eq(jar.header("example.com", "/", false, 179).1, "session=live");
+        testing::assert_eq(jar.header("example.com", "/", false, 180).1, "");
+    }
+    let jar = empty.set("example.com", "/", "session=live; Expires=invalid", 100);
+    testing::assert_eq(jar.header("example.com", "/", false, 180).1, "session=live");
+    let jar = empty.set(
+        "example.com",
+        "/",
+        "session=live; Max-Age=200; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Expires=invalid",
+        100,
+    );
+    testing::assert_eq(jar.header("example.com", "/", false, 299).1, "session=live");
+    testing::assert_eq(jar.header("example.com", "/", false, 300).1, "");
+}
+
+#[test]
+fn duplicate_path_uses_the_last_attribute_including_default_path_fallback() -> () {
+    let empty = testing::expect_some(cookies::Jar::new(), "jar");
+    for last in["Path=", "Path=relative", "Path"] {
+        let jar = empty.set("example.com", "/account/login", "session=live; Path=/; " + last, 100);
+        testing::assert_eq(jar.header("example.com", "/outside", false, 100).1, "");
+        testing::assert_eq(jar.header("example.com", "/account/page", false, 100).1, "session=live");
+        testing::assert_eq(jar.header("example.com", "/accounting", false, 100).1, "");
+    }
+    let jar = empty.set("example.com", "/account/login", "session=live; Path=/old; Path=/new", 100);
+    testing::assert_eq(jar.header("example.com", "/old/page", false, 100).1, "");
+    testing::assert_eq(jar.header("example.com", "/account/page", false, 100).1, "");
+    testing::assert_eq(jar.header("example.com", "/new/page", false, 100).1, "session=live");
+}

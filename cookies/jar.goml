@@ -162,14 +162,18 @@ impl Jar {
                     }
                     domain = candidate;
                 },
-                "path" => if value.starts_with("/") {
-                    path = value;
+                "path" => {
+                    path = if value.starts_with("/") {
+                        value
+                    } else {
+                        default_path(request_path)
+                    };
                 },
                 "secure" => {
                     secure = true;
                 },
-                "expires" => {
-                    expires = cookie_date(value);
+                "expires" => if let Some(expiry) = cookie_date(value) {
+                    expires = Option::Some(expiry);
                 },
                 "max-age" => if value.starts_with("-") {
                     if decimal(value.byte_slice(1, value.byte_len())).is_some() {
