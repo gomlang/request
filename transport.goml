@@ -642,7 +642,7 @@ fn http1_exchange(
     if method != "HEAD" && status != 204 && status != 304 && status >= 200 {
         let lengths = response_headers.get_all("content-length");
         let transfer = ascii_lower(response_headers.get_all("transfer-encoding").join(","));
-        if transfer != "" && transfer != "chunked" {
+        if response_headers.contains("transfer-encoding") && transfer != "chunked" {
             return Result::Err(transport_error("unsupported HTTP transfer encoding"))
         }
         if transfer == "chunked" {

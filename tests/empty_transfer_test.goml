@@ -1,0 +1,52 @@
+package tests;
+
+use ecosystem::request::{Client, ErrorKind};
+use std::testing;
+
+#[test]
+fn buffered_responses_reject_empty_transfer_encoding() -> () {
+    for value in["", " \t"] {
+        for length in["", "Content-Length: 2\r\n"] {
+            wire_response(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding:" + value + "\r\n" + length
+                    + "Connection: close\r\n\r\nok",
+                |url| {
+                    let client = testing::expect_ok(Client::new(), "client");
+                    defer client.close();
+                    testing::assert_eq(
+                        testing::expect_err(client.get(url).send(), "empty transfer coding").kind,
+                        ErrorKind::Transport,
+                    );
+                },
+            );
+        }
+    }
+}
+
+#[test]
+fn streaming_responses_reject_empty_transfer_encoding_before_callback() -> () {
+    for value in["", " \t"] {
+        for length in["", "Content-Length: 2\r\n"] {
+            wire_response(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding:" + value + "\r\n" + length
+                    + "Connection: close\r\n\r\nok",
+                |url| {
+                    let client = testing::expect_ok(Client::new(), "client");
+                    defer client.close();
+                    let called = Ref::new(false);
+                    let result = client.get(url).send_stream(
+                        |_| {
+                            called.set(true);
+                            Result::Ok(())
+                        },
+                    );
+                    testing::assert_eq(
+                        testing::expect_err(result, "empty streaming transfer coding").kind,
+                        ErrorKind::Transport,
+                    );
+                    testing::assert(!called.get());
+                },
+            );
+        }
+    }
+}
