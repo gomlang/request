@@ -191,6 +191,10 @@ func Wait(value Server) bool {
 }
 
 func StartProxy(secure bool) Server {
+	return StartProxyStatus(secure, 200)
+}
+
+func StartProxyStatus(secure bool, status int) Server {
 	transport := &http.Transport{DisableKeepAlives: true}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "CONNECT" {
@@ -205,7 +209,7 @@ func StartProxy(secure bool) Server {
 				return
 			}
 			defer local.Close()
-			io.WriteString(local, "HTTP/1.1 200 Connection Established\r\n\r\n")
+			io.WriteString(local, "HTTP/1.1 "+strconv.Itoa(status)+" Connection Established\r\n\r\n")
 			done := make(chan struct{})
 			go func() {
 				io.Copy(remote, local)

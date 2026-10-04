@@ -41,3 +41,6 @@ extern fn release_requests(server: Server) -> ();
 
 #[go_ffi("example.com/goml-ecosystem/request/testserver", "StartProxy")]
 extern fn start_proxy(secure: bool) -> Server;
+
+#[go_ffi("example.com/goml-ecosystem/request/testserver", "StartProxyStatus")]
+extern fn start_proxy_status(secure: bool, status: isize) -> Server;

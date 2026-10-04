@@ -1,0 +1,59 @@
+package tests;
+
+use ecosystem::request::{Client, ErrorKind};
+use std::testing;
+
+#[test]
+fn connect_tunnels_accept_every_successful_status_class() -> () {
+    let origin = start(true, false);
+    defer close(origin);
+    for status in[201, 204, 299] {
+        let proxy = start_proxy_status(false, status);
+        defer close(proxy);
+        let client = testing::expect_ok(
+            Client::builder().proxy(url(proxy)).add_root_certificate(certificate(origin)).build(),
+            "trusted proxied client",
+        );
+        defer client.close();
+        testing::assert_eq(
+            testing::expect_ok(
+                client.get(url(origin)).send().and_then(|response| response.text()),
+                "buffered tunnel",
+            ),
+            "ok",
+        );
+        testing::assert_eq(
+            testing::expect_ok(
+                client.get(url(origin)).send_stream(|response| streaming_text(response)),
+                "streaming tunnel",
+            ),
+            "ok",
+        );
+    }
+}
+
+#[test]
+fn connect_tunnels_reject_non_success_and_malformed_status_codes() -> () {
+    let origin = start(true, false);
+    defer close(origin);
+    for status in[20, 2000, 300, 407, 500] {
+        let proxy = start_proxy_status(false, status);
+        defer close(proxy);
+        let client = testing::expect_ok(
+            Client::builder().proxy(url(proxy)).add_root_certificate(certificate(origin)).build(),
+            "proxied client",
+        );
+        defer client.close();
+        testing::assert_eq(
+            testing::expect_err(client.get(url(origin)).send(), "failed CONNECT").kind,
+            ErrorKind::Transport,
+        );
+        testing::assert_eq(
+            testing::expect_err(
+                client.get(url(origin)).send_stream(|response| streaming_text(response)),
+                "failed streaming CONNECT",
+            ).kind,
+            ErrorKind::Transport,
+        );
+    }
+}
