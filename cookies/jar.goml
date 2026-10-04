@@ -71,6 +71,18 @@ fn cookie_token(value: string) -> bool {
     true
 }
 
+fn trim_wsp(value: string) -> string {
+    let mut start = 0;
+    let mut end = value.byte_len();
+    while start < end && (value.byte_get(start) == b' ' || value.byte_get(start) == b'\t') {
+        start += 1;
+    }
+    while end > start && (value.byte_get(end - 1) == b' ' || value.byte_get(end - 1) == b'\t') {
+        end -= 1;
+    }
+    value.byte_slice(start, end)
+}
+
 fn evict_oldest(entries: Vec[StoredCookie], domain: Option[string]) -> () {
     let mut oldest = Option::None;
     for index in 0..entries.len() {
@@ -115,7 +127,9 @@ impl Jar {
             return Option::None
         }
         let parts = text.split(";");
-        let (name, value) = parts[0].trim().split_once("=")?;
+        let (name, value) = parts[0].split_once("=")?;
+        let name = trim_wsp(name);
+        let value = trim_wsp(value);
         if !cookie_token(name) {
             return Option::None
         }
@@ -136,11 +150,12 @@ impl Jar {
         let mut expires = Option::None;
         let mut max_age = Option::None;
         for index in 1..parts.len() {
-            let part = parts[index].trim();
+            let part = parts[index];
             let (key, value) = part.split_once("=").unwrap_or((part, ""));
-            match lower_ascii(key.trim()) {
+            let value = trim_wsp(value);
+            match lower_ascii(trim_wsp(key)) {
                 "domain" => {
-                    let mut candidate = unicode::lowercase(value.trim());
+                    let mut candidate = unicode::lowercase(value);
                     if candidate.starts_with(".") {
                         candidate = candidate.byte_slice(1, candidate.byte_len());
                     }

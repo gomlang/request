@@ -17,6 +17,9 @@ after updating the expected checksum. The list is licensed under MPL 2.0; see
 request path and Unix timestamp. `Jar::header` selects a Cookie field for a
 target host, path and scheme, pruning expired entries on access. `Jar::new`
 uses the bundled list; `with_suffixes` accepts a caller-provided list.
+Cookie names, values and attributes trim ASCII space and tab at their boundaries,
+including either side of `=`. Internal value spaces remain intact; other control
+bytes are not treated as whitespace.
 
 Repeated Expires and Path attributes follow [RFC 6265 sections 5.2 and 5.3](https://www.rfc-editor.org/rfc/rfc6265.html#section-5.2):
 the last valid Expires date wins, while an invalid date is ignored. The last Path

@@ -1,0 +1,60 @@
+package tests;
+
+use ecosystem::request::cookies;
+use std::testing;
+
+#[test]
+fn cookie_whitespace_is_trimmed_from_each_name_and_value() -> () {
+    let empty = testing::expect_some(cookies::Jar::new(), "jar");
+    for pair in[
+        " session \t=\t value \t",
+        "session= value",
+        "session =value",
+        "session = \"value\" ",
+    ] {
+        let jar = empty.set("example.com", "/", pair, 100);
+        testing::assert_eq(jar.header("example.com", "/", false, 100).1, "session=value");
+    }
+    let jar = empty.set("example.com", "/", "session= one two ", 100);
+    testing::assert_eq(jar.header("example.com", "/", false, 100).1, "session=one two");
+    let jar = empty.set("example.com", "/", "session= \t", 100);
+    testing::assert_eq(jar.header("example.com", "/", false, 100).1, "session=");
+}
+
+#[test]
+fn cookie_whitespace_does_not_change_attribute_scope() -> () {
+    let empty = testing::expect_some(cookies::Jar::new(), "jar");
+    let jar = empty.set(
+        "example.com",
+        "/",
+        "session=live; Path = \t/private \t; Max-Age = \t2 \t",
+        100,
+    );
+    testing::assert_eq(jar.header("example.com", "/", false, 100).1, "");
+    testing::assert_eq(jar.header("example.com", "/private/page", false, 101).1, "session=live");
+    testing::assert_eq(jar.header("example.com", "/private/page", false, 102).1, "");
+}
+
+#[test]
+fn cookie_whitespace_does_not_prevent_expiry_or_deletion() -> () {
+    let empty = testing::expect_some(cookies::Jar::new(), "jar");
+    let jar = empty.set("example.com", "/", "session=live; Max-Age = \t2 \t", 100);
+    testing::assert_eq(jar.header("example.com", "/", false, 101).1, "session=live");
+    testing::assert_eq(jar.header("example.com", "/", false, 102).1, "");
+    let old = empty.set("example.com", "/", "session=old", 100);
+    for age in[" 0", "\t-1\t"] {
+        let deleted = old.set("example.com", "/", "session=gone; Max-Age=" + age, 100);
+        testing::assert_eq(deleted.len(), 0);
+    }
+}
+
+#[test]
+fn cookie_whitespace_does_not_strip_non_wsp_control_bytes() -> () {
+    let empty = testing::expect_some(cookies::Jar::new(), "jar");
+    for control in["\r", "\n"] {
+        for pair in[control + "session=value", "session=value" + control] {
+            let jar = empty.set("example.com", "/", pair, 100);
+            testing::assert_eq(jar.len(), 0);
+        }
+    }
+}
