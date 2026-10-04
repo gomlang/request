@@ -115,7 +115,7 @@ fn parse_url(text: string, base: string) -> Result[Url, Error] {
     if !scheme_prefix && base != "" {
         let parent = Url::parse(base)?;
         if text.starts_with("//") {
-            return Url::parse(parent.scheme() + ":" + text)
+            return parse_url(parent.scheme() + ":" + text, base)
         }
         let (base_path, _) = parent.target.split_once("?").unwrap_or((parent.target, ""));
         let target = if text == "" {
@@ -131,7 +131,12 @@ fn parse_url(text: string, base: string) -> Result[Url, Error] {
         };
         let (path, query) = target.split_once("?").unwrap_or((target, ""));
         return Url::parse(
-            parent.scheme() + "://" + parent.authority + normalized_path(path)
+            parent.scheme() + "://" + parent.authority
+                + if text == "" || text.starts_with("?") {
+                    path
+                } else {
+                    normalized_path(path)
+                }
                 + if target.contains("?") {
                     "?" + query
                 } else {
@@ -197,6 +202,11 @@ fn parse_url(text: string, base: string) -> Result[Url, Error] {
         "/"
     } else {
         reference.raw_path()
+    };
+    let path = if base == "" {
+        path
+    } else {
+        normalized_path(path)
     };
     let target = encode_request_path(path)
         + match reference.raw_query() {

@@ -287,6 +287,13 @@ against the current URL. POST becomes GET on 301/302, and 303 converts non-HEAD
 methods to GET; 307/308 retain method and body. A rewritten GET drops its body,
 Content-Type and Content-Encoding.
 
+`Url::join` and redirect resolution apply the path rules in
+[RFC 3986 section 5.2.2](https://www.rfc-editor.org/rfc/rfc3986.html#section-5.2.2).
+Empty, fragment-only and query-only references retain the inherited path.
+References with a new path, including absolute URLs and network-path references,
+remove literal `.` and `..` segments without decoding percent escapes or
+changing the query. Parsing an absolute URL alone retains its path spelling.
+
 Origin changes remove Authorization, Proxy-Authorization, Cookie, Cookie2 and
 WWW-Authenticate headers. This includes a change of port on the same hostname.
 These headers stay removed if a later redirect returns to the original origin.
