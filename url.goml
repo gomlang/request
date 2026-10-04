@@ -70,17 +70,21 @@ fn normalized_path(path: string) -> string {
     let components: Vec[string] = Vec::new();
     for part in path.split("/") {
         if part == ".." {
-            let _ = components.pop();
+            // HTTP paths are absolute. Retain the root marker when a parent
+            // segment moves above it, including before another empty segment.
+            if components.len() > 1 {
+                let _ = components.pop();
+            }
         } else if part != "." {
             components.push(part)
         }
     }
+    if path.ends_with("/.") || path.ends_with("/..") {
+        components.push("");
+    }
     let mut result = components.join("/");
     if !result.starts_with("/") {
         result = "/" + result;
-    }
-    if (path.ends_with("/.") || path.ends_with("/..")) && !result.ends_with("/") {
-        result += "/";
     }
     result
 }

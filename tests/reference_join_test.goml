@@ -32,8 +32,7 @@ fn reference_join_removes_dot_segments_from_absolute_and_network_references() ->
     }
 }
 
-#[test]
-fn reference_join_query_redirect_preserves_the_requested_path_over_tcp() -> () {
+fn reference_redirect_target(reference: string, initial: string, expected: string) -> () {
     for streaming in[false, true] {
         let listener = testing::expect_ok(
             net::TcpListener::bind(net::SocketAddr::new(net::IpAddr::V4([127, 0, 0, 1]), 0)),
@@ -77,7 +76,8 @@ fn reference_join_query_redirect_preserves_the_requested_path_over_tcp() -> () {
                                 ).0,
                             );
                             let response = if index == 0 {
-                                "HTTP/1.1 302 Found\r\nLocation: ?new=1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                                "HTTP/1.1 302 Found\r\nLocation: " + reference
+                                    + "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                             } else {
                                 "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
                             };
@@ -89,9 +89,7 @@ fn reference_join_query_redirect_preserves_the_requested_path_over_tcp() -> () {
                 );
                 let client = testing::expect_ok(Client::new(), "client");
                 defer client.close();
-                let request = client.get(origin + "/a/./b/../c%2fd?old").timeout(
-                    Duration::from_seconds(2),
-                );
+                let request = client.get(origin + initial).timeout(Duration::from_seconds(2));
                 let result = if streaming {
                     request.send_stream(|response| streaming_text(response))
                 } else {
@@ -102,11 +100,53 @@ fn reference_join_query_redirect_preserves_the_requested_path_over_tcp() -> () {
         );
         testing::assert_eq(
             testing::expect_some(observed.recv(), "initial request"),
-            "GET /a/./b/../c%2fd?old HTTP/1.1",
+            "GET " + initial + " HTTP/1.1",
         );
         testing::assert_eq(
             testing::expect_some(observed.recv(), "redirected request"),
-            "GET /a/./b/../c%2fd?new=1 HTTP/1.1",
+            "GET " + expected + " HTTP/1.1",
         );
     }
+}
+
+#[test]
+fn reference_join_query_redirect_preserves_the_requested_path_over_tcp() -> () {
+    reference_redirect_target("?new=1", "/a/./b/../c%2fd?old", "/a/./b/../c%2fd?new=1");
+}
+
+#[test]
+fn reference_join_dot_segments_keep_empty_segments_above_the_root() -> () {
+    let base = testing::expect_ok(Url::parse("http://example.com/base/file"), "base");
+    for (reference, expected) in[
+        ("/..//target?next=/../x", "http://example.com//target?next=/../x"),
+        ("../..//target", "http://example.com//target"),
+        ("/a/../../..///target", "http://example.com///target"),
+        ("http://other.test/..//target", "http://other.test//target"),
+        ("//other.test/..//target", "http://other.test//target"),
+    ] {
+        testing::assert_eq(testing::expect_ok(base.join(reference), "join").as_string(), expected);
+    }
+}
+
+#[test]
+fn reference_join_final_dot_segments_keep_adjacent_empty_segments() -> () {
+    let base = testing::expect_ok(Url::parse("http://example.com/base/file"), "base");
+    for (reference, expected) in[
+        ("/a//.", "http://example.com/a//"),
+        ("/a///..", "http://example.com/a//"),
+        ("/a//.?next=/../x", "http://example.com/a//?next=/../x"),
+        ("http://other.test/a///..", "http://other.test/a//"),
+        ("//other.test/a//.", "http://other.test/a//"),
+        ("/a/%2e//.", "http://example.com/a/%2e//"),
+        ("/a/..", "http://example.com/"),
+        ("/../.", "http://example.com/"),
+    ] {
+        testing::assert_eq(testing::expect_ok(base.join(reference), "join").as_string(), expected);
+    }
+}
+
+#[test]
+fn reference_join_redirect_keeps_empty_path_segments_over_tcp() -> () {
+    reference_redirect_target("/a//.", "/initial", "/a//");
+    reference_redirect_target("/..//target", "/initial", "//target");
 }

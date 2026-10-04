@@ -293,6 +293,8 @@ Empty, fragment-only and query-only references retain the inherited path.
 References with a new path, including absolute URLs and network-path references,
 remove literal `.` and `..` segments without decoding percent escapes or
 changing the query. Parsing an absolute URL alone retains its path spelling.
+Dot-segment removal preserves other empty path segments, including repeated
+slashes at the root and before a final `.` or `..`.
 
 Origin changes remove Authorization, Proxy-Authorization, Cookie, Cookie2 and
 WWW-Authenticate headers. This includes a change of port on the same hostname.
