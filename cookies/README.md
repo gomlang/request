@@ -21,10 +21,11 @@ Cookie names, values and attributes trim ASCII space and tab at their boundaries
 including either side of `=`. Internal value spaces remain intact; other control
 bytes are not treated as whitespace.
 
-Repeated Expires and Path attributes follow [RFC 6265 sections 5.2 and 5.3](https://www.rfc-editor.org/rfc/rfc6265.html#section-5.2):
+Repeated Expires, Path and Domain attributes follow [RFC 6265 sections 5.2 and 5.3](https://www.rfc-editor.org/rfc/rfc6265.html#section-5.2):
 the last valid Expires date wins, while an invalid date is ignored. The last Path
 attribute wins; an empty or relative value selects the request's default path.
-Max-Age continues to take precedence over Expires.
+The last Domain attribute selects the scope and is checked against the response
+host and public suffix policy. Max-Age continues to take precedence over Expires.
 
 `cookie_date` parses Expires with the token algorithm in
 [RFC 6265 section 5.1.1](https://www.rfc-editor.org/rfc/rfc6265.html#section-5.1.1),

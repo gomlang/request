@@ -52,3 +52,44 @@ fn duplicate_path_uses_the_last_attribute_including_default_path_fallback() -> (
     testing::assert_eq(jar.header("example.com", "/account/page", false, 100).1, "");
     testing::assert_eq(jar.header("example.com", "/new/page", false, 100).1, "session=live");
 }
+
+#[test]
+fn duplicate_domain_uses_the_last_attribute_before_validating_scope() -> () {
+    let empty = testing::expect_some(cookies::Jar::new(), "jar");
+    for earlier in["other.co.uk", "co.uk", "bad..domain"] {
+        let jar = empty.set(
+            "shop.example.co.uk",
+            "/",
+            "session=live; Domain=" + earlier + "; Domain=.example.co.uk",
+            100,
+        );
+        testing::assert_eq(jar.header("shop.example.co.uk", "/", false, 100).1, "session=live");
+        testing::assert_eq(jar.header("other.example.co.uk", "/", false, 100).1, "session=live");
+        testing::assert_eq(jar.header("other.co.uk", "/", false, 100).1, "");
+    }
+}
+
+#[test]
+fn duplicate_domain_rejects_an_invalid_last_attribute_without_replacing_cookies() -> () {
+    let empty = testing::expect_some(cookies::Jar::new(), "jar");
+    let original = empty.set("shop.example.co.uk", "/", "session=old; Domain=example.co.uk", 100);
+    for last in["other.co.uk", "co.uk", "bad..domain"] {
+        let jar = original.set(
+            "shop.example.co.uk",
+            "/",
+            "session=new; Domain=example.co.uk; Domain=" + last,
+            100,
+        );
+        testing::assert_eq(jar.header("shop.example.co.uk", "/", false, 100).1, "session=old");
+        testing::assert_eq(jar.header("other.example.co.uk", "/", false, 100).1, "session=old");
+        testing::assert_eq(jar.len(), 1);
+    }
+    let scoped = empty.set(
+        "shop.example.co.uk",
+        "/",
+        "session=live; Domain=example.co.uk; Domain=shop.example.co.uk",
+        100,
+    );
+    testing::assert_eq(scoped.header("shop.example.co.uk", "/", false, 100).1, "session=live");
+    testing::assert_eq(scoped.header("other.example.co.uk", "/", false, 100).1, "");
+}

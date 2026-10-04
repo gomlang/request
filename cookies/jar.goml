@@ -149,33 +149,14 @@ impl Jar {
         let mut secure = false;
         let mut expires = Option::None;
         let mut max_age = Option::None;
+        let mut domain_attribute = Option::None;
         for index in 1..parts.len() {
             let part = parts[index];
             let (key, value) = part.split_once("=").unwrap_or((part, ""));
             let value = trim_wsp(value);
             match lower_ascii(trim_wsp(key)) {
                 "domain" => {
-                    let mut candidate = unicode::lowercase(value);
-                    if candidate.starts_with(".") {
-                        candidate = candidate.byte_slice(1, candidate.byte_len());
-                    }
-                    if !valid_domain(candidate) || !domain_matches(host, candidate) {
-                        return Option::None
-                    }
-                    if net::IpAddr::parse(host).is_ok() {
-                        if host != candidate {
-                            return Option::None
-                        }
-                    } else {
-                        let suffix = self.suffixes.suffix(candidate)?;
-                        if suffix == candidate && host != candidate {
-                            return Option::None
-                        }
-                        if suffix != candidate {
-                            host_only = false;
-                        }
-                    }
-                    domain = candidate;
+                    domain_attribute = Option::Some(value);
                 },
                 "path" => {
                     path = if value.starts_with("/") {
@@ -207,6 +188,29 @@ impl Jar {
                 },
                 _ => (),
             }
+        }
+        if let Some(value) = domain_attribute {
+            let mut candidate = unicode::lowercase(value);
+            if candidate.starts_with(".") {
+                candidate = candidate.byte_slice(1, candidate.byte_len());
+            }
+            if !valid_domain(candidate) || !domain_matches(host, candidate) {
+                return Option::None
+            }
+            if net::IpAddr::parse(host).is_ok() {
+                if host != candidate {
+                    return Option::None
+                }
+            } else {
+                let suffix = self.suffixes.suffix(candidate)?;
+                if suffix == candidate && host != candidate {
+                    return Option::None
+                }
+                if suffix != candidate {
+                    host_only = false;
+                }
+            }
+            domain = candidate;
         }
         Option::Some(
             StoredCookie {
