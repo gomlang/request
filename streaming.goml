@@ -720,7 +720,7 @@ fn streaming_hop(
     if ((status == 301 || status == 302) && method == "POST") || (status == 303 && method != "HEAD") {
         method = "GET";
         body_enabled = false;
-        headers = headers.remove("content-type").remove("content-encoding");
+        headers = redirect_without_content(headers);
     } else if reader_body && body_enabled && length != Option::Some(0) {
         return Result::Err(
             Error::new(ErrorKind::Redirect, "cannot replay a streaming upload across this redirect"),

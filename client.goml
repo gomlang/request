@@ -389,6 +389,14 @@ fn trace_event(
     }
 }
 
+fn redirect_without_content(headers: Headers) -> Headers {
+    headers.remove("content-type").remove("content-encoding").remove("content-language").remove(
+        "content-location",
+    ).remove("content-range").remove("last-modified").remove("content-digest").remove("repr-digest").remove(
+        "digest",
+    ).remove("content-md5")
+}
+
 fn execute_loop(client: Client, request: Request, control: context::Context, trace_id: i64) -> Result[
     Response,
     Error,
@@ -470,7 +478,7 @@ fn execute_loop(client: Client, request: Request, control: context::Context, tra
             || (status == 303 && method != "HEAD") {
             method = "GET";
             body = FrozenBytes::new();
-            headers = headers.remove("content-type").remove("content-encoding");
+            headers = redirect_without_content(headers);
         }
         history.push(url);
         url = next;

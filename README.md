@@ -288,8 +288,12 @@ DNS, TLS handshakes and body reads.
 `Limited(count)` follows 301/302/303/307/308; `SameOrigin(count)` rejects changes
 of scheme, hostname or effective port. Relative Location values are resolved
 against the current URL. POST becomes GET on 301/302, and 303 converts non-HEAD
-methods to GET; 307/308 retain method and body. A rewritten GET drops its body,
-Content-Type and Content-Encoding.
+methods to GET; 307/308 retain method and body. A rewritten GET drops its body
+and content-specific metadata, including content type, encoding, language,
+location, range, Last-Modified and integrity digests, as described by
+[RFC 9110 section 15.4](https://www.rfc-editor.org/rfc/rfc9110.html#section-15.4).
+Buffered requests, streamed responses and streaming uploads apply the same
+header cleanup; redirects that preserve the request retain this metadata.
 
 `Url::join` and redirect resolution apply the path rules in
 [RFC 3986 section 5.2.2](https://www.rfc-editor.org/rfc/rfc3986.html#section-5.2.2).
