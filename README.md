@@ -13,7 +13,9 @@ by name when encoded. Raw URL parsing does not automatically decode queries;
 `Url::query` and the builder query operation perform that validation. Paths retain
 their original valid percent spelling instead of using the standard ASCII
 serializer's uppercase normalization. Absolute URL decomposition and path-escape
-validation use `std::net::url::Reference`; raw query parsing remains separate.
+validation use `std::net::url::Reference`; host syntax is validated with
+`std::net::url::Authority`, rejecting invalid registered-name characters and
+bracketed IPv4 addresses. Raw query parsing remains separate.
 Fragment text is dropped before decomposition, retaining the client's existing
 fragment policy. HTTP(S), credential and redirect policies
 remain in this ecosystem module. These shared APIs are included in the required GoML 0.1.56 or newer toolchain;

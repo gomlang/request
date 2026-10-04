@@ -158,6 +158,7 @@ fn parse_url(text: string, base: string) -> Result[Url, Error] {
         || authority.contains("%") {
         return Result::Err(invalid_url())
     }
+    let _ = url::Authority::parse(authority, authority.byte_len()).map_err(|_| invalid_url())?;
     let (host, port_text) = if authority.starts_with("[") {
         let (host, tail) = authority.byte_slice(1, authority.byte_len()).split_once("]").ok_or(
             invalid_url(),
