@@ -516,24 +516,30 @@ fn streaming_send_head(
     length: Option[isize],
     proxy: bool,
 ) -> Result[(), Error] {
-    let mut head = method + " "
-        + if proxy {
-            url.text
-        } else {
-            url.target
-        }
-        + " HTTP/1.1\r\nHost: "
-        + url.authority
-        + "\r\nConnection: close\r\n";
+    let head = Bytes::from_string(
+        method + " "
+            + if proxy {
+                url.text
+            } else {
+                url.target
+            }
+            + " HTTP/1.1\r\nHost: "
+            + url.authority
+            + "\r\nConnection: close\r\n",
+    );
     for (name, value) in headers.entries() {
-        head += name + ": " + value + "\r\n";
+        head.extend_from_slice(name.to_bytes().as_slice());
+        head.extend_from_slice(b": ".as_slice());
+        head.extend_from_slice(value.to_bytes().as_slice());
+        head.extend_from_slice(b"\r\n".as_slice());
     }
-    head += match length {
+    let framing = match length {
         Some(count) => "Content-Length: " + count.to_string() + "\r\n",
         None => "Transfer-Encoding: chunked\r\n",
     };
-    head += "\r\n";
-    stream.write(head.to_bytes().as_slice(), control)
+    head.extend_from_slice(framing.to_bytes().as_slice());
+    head.extend_from_slice(b"\r\n".as_slice());
+    stream.write(head.as_slice(), control)
 }
 
 struct StreamingRequestState {

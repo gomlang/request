@@ -1,0 +1,94 @@
+package tests;
+
+use ecosystem::request::{Client};
+use std::bytes::{Bytes};
+use std::io;
+use std::net;
+use std::testing;
+use std::time::{Duration};
+
+fn request_head_wire_case(api: string, fields: Vec[(string, string)]) -> () {
+    let payload = "a\r\nb";
+    streaming_peer(
+        |socket| {
+            let authority = testing::expect_ok(socket.local_addr(), "server address").to_string();
+            let mut expected = "POST /wire?x=%C3%A9 HTTP/1.1\r\nHost: " + authority + "\r\n";
+            if api != "buffered" {
+                expected += "Connection: close\r\n";
+            }
+            for (name, value) in fields {
+                expected += name + ": " + value + "\r\n";
+            }
+            expected += "user-agent: goml-request/1\r\naccept-encoding: "
+                + if api == "buffered" {
+                    "gzip"
+                } else {
+                    "identity"
+                }
+                + "\r\n";
+            if api == "chunked" {
+                expected += "Transfer-Encoding: chunked\r\n\r\n4\r\na\r\nb\r\n0\r\n\r\n";
+            } else {
+                expected += "Content-Length: 4\r\n\r\n" + payload;
+            }
+            let received: Vec[u8] = Vec::with_capacity(expected.byte_len());
+            for _ in 0..expected.byte_len() {
+                received.push(0);
+            }
+            let wait = net::WaitOptions::new().with_timeout(Duration::from_seconds(3));
+            testing::assert_ok(socket.read_exact_with(received.as_mut_slice(), wait));
+            testing::assert(received == expected.to_bytes());
+            testing::assert_ok(
+                socket.write_all_with(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".as_slice(),
+                    wait,
+                ),
+            );
+        },
+        |origin| {
+            let client = testing::expect_ok(Client::new(), "client");
+            defer client.close();
+            let mut builder = client.post(origin + "/wire?x=%C3%A9");
+            for (name, value) in fields {
+                builder = builder.append_header(name.to_ascii_uppercase(), value);
+            }
+            let result = if api == "buffered" {
+                builder.body(Bytes::from_string(payload)).send().and_then(
+                    |response| response.text(),
+                )
+            } else if api == "stream" {
+                builder.body(Bytes::from_string(payload)).send_stream(streaming_text)
+            } else {
+                builder.send_reader(
+                    io::StringReader::new(payload),
+                    if api == "chunked" {
+                        Option::None
+                    } else {
+                        Option::Some(4)
+                    },
+                    streaming_text,
+                )
+            };
+            testing::assert_eq(testing::expect_ok(result, "wire response"), "ok");
+        },
+    );
+}
+
+#[test]
+fn request_head_many_fields_keep_exact_order_duplicates_and_body_boundary() -> () {
+    let fields = Vec::from_array([("x-dup", "one"), ("x-dup", "two"), ("x-utf8", "\t café \t")]);
+    for index in 0..128 {
+        fields.push(("x-field-" + index.to_string(), "v".repeat(64)));
+    }
+    for api in["buffered", "stream", "reader", "chunked"] {
+        request_head_wire_case(api, fields);
+    }
+}
+
+#[test]
+fn request_head_empty_and_single_large_field_keep_framing() -> () {
+    for api in["buffered", "stream", "reader", "chunked"] {
+        request_head_wire_case(api, Vec::new());
+        request_head_wire_case(api, Vec::from_array([("x-large", "é".repeat(8192))]));
+    }
+}

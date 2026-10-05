@@ -582,23 +582,30 @@ fn http1_exchange(
     proxy: bool,
     started: Ref[bool],
 ) -> Result[(Received, bool), Error] {
-    let mut head = method + " "
-        + if proxy {
-            url.text
-        } else {
-            url.target
-        }
-        + " HTTP/1.1\r\nHost: "
-        + url.authority
-        + "\r\n";
+    let head = Bytes::from_string(
+        method + " "
+            + if proxy {
+                url.text
+            } else {
+                url.target
+            }
+            + " HTTP/1.1\r\nHost: "
+            + url.authority
+            + "\r\n",
+    );
     for (name, value) in headers.entries() {
-        head += name + ": " + value + "\r\n";
+        head.extend_from_slice(name.to_bytes().as_slice());
+        head.extend_from_slice(b": ".as_slice());
+        head.extend_from_slice(value.to_bytes().as_slice());
+        head.extend_from_slice(b"\r\n".as_slice());
     }
     if !body.is_empty() || method == "POST" || method == "PUT" || method == "PATCH" {
-        head += "Content-Length: " + body.len().to_string() + "\r\n";
+        head.extend_from_slice(
+            ("Content-Length: " + body.len().to_string() + "\r\n").to_bytes().as_slice(),
+        );
     }
-    head += "\r\n";
-    stream.write(head.to_bytes().as_slice(), context)?;
+    head.extend_from_slice(b"\r\n".as_slice());
+    stream.write(head.as_slice(), context)?;
     stream.write(body.to_vec_copy().as_slice(), context)?;
     trace_event(
         client,
