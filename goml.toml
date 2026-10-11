@@ -2,6 +2,6 @@
 path = "ecosystem::request"
 
 [dependencies]
-"ecosystem::archive" = "0.1.0"
-"ecosystem::textproto" = "0.1.0"
-"ecosystem::mime" = "0.1.0"
+"ecosystem::archive" = true
+"ecosystem::textproto" = true
+"ecosystem::mime" = true

@@ -18,7 +18,7 @@ validation use `std::net::url::Reference`; host syntax is validated with
 bracketed IPv4 addresses. Raw query parsing remains separate.
 Fragment text is dropped before decomposition, retaining the client's existing
 fragment policy. HTTP(S), credential and redirect policies
-remain in this ecosystem module. These shared APIs are included in the required GoML 0.1.56 or newer toolchain;
+remain in this ecosystem module. These shared APIs are included in the required source-built GoML toolchain with unversioned registry support;
 this change does not publish a registry version.
 
 The implementation is pure GoML: URL and MIME encoding, HTTP/1.1 framing,
@@ -383,12 +383,11 @@ and [Go HTTP client/transport](https://pkg.go.dev/net/http).
 
 ## Development and examples
 
-Requires GoML 0.1.56 or newer. The `examples/basic/` example shares the root manifest and its dependencies. From the library root, run:
+Requires the source-built GoML toolchain with unversioned registry support pinned in [verification/ci/toolchain.json](https://github.com/gomlang/verification/blob/main/ci/toolchain.json). The `examples/basic/` example shares the root manifest and its dependencies. From the library root, run:
 
 ```sh
 goml run --example basic
 goml test
-goml verify --timeout 300s
 ```
 
-`goml test` builds the example and runs its tests. `goml verify` repeats the example checks as an independent module against an isolated registry snapshot. `(cd ../verification && just ecosystem-test request)` also retains the library-specific smoke and compatibility checks.
+`goml test` builds the example and runs its tests. `(cd ../verification && just ecosystem-test request)` also retains the library-specific smoke and compatibility checks.
