@@ -1,0 +1,122 @@
+package request;
+
+use ecosystem::compress;
+use ecosystem::compress::gzip;
+use std::context;
+use std::io;
+use io::{Read, Write};
+
+pub struct GzipResponse {
+    response: StreamingResponse,
+    decoder: gzip::Reader[StreamingResponse],
+    gate: Channel[()],
+}
+
+fn gzip_stream_error(error: compress::Error) -> Error {
+    if let Some(cause) = error.cause {
+        return io_error(cause)
+    }
+    Error::new(
+        if error.kind == compress::ErrorKind::Limit {
+            ErrorKind::BodyLimit
+        } else {
+            ErrorKind::Decode
+        },
+        error.to_string(),
+    )
+}
+
+impl GzipResponse {
+    pub fn status(self: GzipResponse) -> StatusCode {
+        self.response.status()
+    }
+
+    pub fn headers(self: GzipResponse) -> Headers {
+        self.response.headers().remove("content-encoding").remove("content-length")
+    }
+
+    pub fn encoded_headers(self: GzipResponse) -> Headers {
+        self.response.headers()
+    }
+
+    pub fn close(self: GzipResponse) -> () {
+        self.response.close()
+    }
+
+    pub fn read_bytes(self: GzipResponse, output: MutSlice[byte]) -> Result[isize, Error] {
+        let _ = self.gate.recv();
+        defer self.gate.send(());
+        if streaming_closed(self.response) {
+            return Result::Err(Error::new(ErrorKind::Closed, "response is closed"))
+        }
+        self.response.reader.context.check().map_err(context_error)?;
+        self.decoder.read_chunk(output).map_err(gzip_stream_error)
+    }
+
+    pub fn copy_to[W: Write](self: GzipResponse, writer: W) -> Result[u64, Error] {
+        let buffer: Vec[byte] = Vec::new();
+        for _ in 0..8192 {
+            buffer.push(0);
+        }
+        let mut total: u64 = 0;
+        loop {
+            let count = self.read_bytes(buffer.as_mut_slice())?;
+            if count == 0 {
+                return Result::Ok(total)
+            }
+            writer.write_all(buffer.slice(0, count)).map_err(io_error)?;
+            total += count.to_u64();
+        }
+    }
+}
+
+impl Read for GzipResponse {
+    fn read(self: GzipResponse, output: MutSlice[byte]) -> Result[isize, io::Error] {
+        self.read_bytes(output).map_err(streaming_io_error)
+    }
+}
+
+impl RequestBuilder {
+    pub fn send_gzip_stream[T](
+        self: RequestBuilder,
+        limits: compress::Limits,
+        consume: (GzipResponse) -> Result[T, Error],
+    ) -> Result[T, Error] {
+        self.send_gzip_stream_with(context::Context::background(), limits, consume)
+    }
+
+    pub fn send_gzip_stream_with[T](
+        self: RequestBuilder,
+        parent: context::Context,
+        limits: compress::Limits,
+        consume: (GzipResponse) -> Result[T, Error],
+    ) -> Result[T, Error] {
+        limits.validate().map_err(gzip_stream_error)?;
+        self.header("accept-encoding", "gzip").send_stream_with(
+            parent,
+            |response| {
+                let encodings = response.headers().get_all("content-encoding");
+                if encodings.len() != 1 || !encodings[0].trim().eq_ignore_ascii_case("gzip") {
+                    return Result::Err(
+                        Error::new(
+                            ErrorKind::Decode,
+                            "gzip stream requires one gzip content encoding",
+                        ),
+                    )
+                }
+                let decoder = gzip::Reader::new(response, limits).map_err(gzip_stream_error)?;
+                let gate = Channel::new(1);
+                gate.send(());
+                let stream = GzipResponse { response, decoder, gate };
+                let result = consume(stream);
+                stream.close();
+                let _ = gate.recv();
+                defer gate.send(());
+                if let Some(error) = decoder.error() {
+                    return Result::Err(gzip_stream_error(error))
+                }
+                result
+            },
+        )
+    }
+}

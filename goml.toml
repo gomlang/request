@@ -5,3 +5,4 @@ path = "ecosystem::request"
 "ecosystem::archive" = true
 "ecosystem::textproto" = true
 "ecosystem::mime" = true
+"ecosystem::compress" = true

@@ -1,5 +1,6 @@
 package tests;
 
+use ecosystem::compress;
 use ecosystem::request::{Client, Error, ErrorKind, StreamingResponse, SseDecoder};
 use std::net;
 use std::task;
@@ -670,4 +671,175 @@ fn streaming_body_timeout_and_client_close_are_recoverable() -> () {
         "client closes active stream",
     );
     testing::assert_eq(error.kind, ErrorKind::Closed);
+}
+
+fn gzip_limits() -> compress::Limits {
+    compress::Limits {
+        max_input_bytes: 1024,
+        max_output_bytes: 1024,
+        max_blocks: 128,
+        max_work: 100000,
+    }
+}
+
+#[test]
+fn gzip_stream_fragmentation_limits_and_truncation() -> () {
+    let encoded = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff\xcb\x48\xcd\xc9\xc9\x57\x28\xcf\x2f\xca\x49\x01\x00\x85\x11\x4a\x0d\x0b\x00\x00\x00";
+    for mode in 0..4 {
+        streaming_peer(
+            |socket| {
+                let headers = streaming_head(socket);
+                testing::assert(headers.contains("accept-encoding: gzip"));
+                testing::expect_ok(
+                    socket.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nConnection: close\r\n\r\n".as_slice(),
+                    ),
+                    "gzip head",
+                );
+                let data = encoded.copy();
+                if mode == 2 {
+                    let _ = data.pop();
+                }
+                if mode == 3 {
+                    data[data.len() - 8] = data[data.len() - 8] ^ 1;
+                }
+                for octet in data {
+                    let _ = socket.write_all(Vec::from_array([octet]).as_slice());
+                }
+            },
+            |url| {
+                let client = testing::expect_ok(
+                    Client::builder().timeout(Duration::from_seconds(3)).build(),
+                    "client",
+                );
+                defer client.close();
+                let retained: Ref[Option[ecosystem::request::GzipResponse]] = Ref::new(Option::None);
+                let limits = if mode == 1 {
+                    compress::Limits { max_output_bytes: 10, ..gzip_limits() }
+                } else {
+                    gzip_limits()
+                };
+                let result = client.get(url).send_gzip_stream(
+                    limits,
+                    |response| {
+                        retained.set(Option::Some(response));
+                        testing::assert(response.headers().get("content-encoding").is_none());
+                        let output = io::Cursor::new(Bytes::new());
+                        response.copy_to(output)?;
+                        Result::Ok(())
+                    },
+                );
+                if mode == 0 {
+                    testing::expect_ok(result, "gzip decode");
+                } else {
+                    testing::assert(result.is_err());
+                }
+                if let Some(response) = retained.get() {
+                    let buffer = b"x";
+                    testing::assert_eq(
+                        testing::expect_err(
+                            response.read_bytes(buffer.as_mut_slice()),
+                            "closed decoder",
+                        ).kind,
+                        ErrorKind::Closed,
+                    );
+                }
+            },
+        );
+    }
+}
+
+#[test]
+fn gzip_stream_delivers_before_tail_and_closes_on_cancel_or_panic() -> () {
+    let encoded = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\x03\xcb\x48\xcd\xc9\xc9\x57\x28\xcf\x2f\xca\x49\x01\x00\x85\x11\x4a\x0d\x0b\x00\x00\x00";
+    for mode in 0..4 {
+        let progress = Channel::new(1);
+        let peer_done: Channel[()] = Channel::new(1);
+        streaming_peer(
+            |socket| {
+                defer peer_done.close();
+                let _ = streaming_head(socket);
+                testing::expect_ok(
+                    socket.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nConnection: close\r\n\r\n".as_slice(),
+                    ),
+                    "head",
+                );
+                testing::expect_ok(socket.write_all(encoded.slice(0, 20)), "gzip prefix");
+                if mode == 0 {
+                    let _ = progress.recv();
+                    testing::expect_ok(
+                        socket.write_all(encoded.slice(20, encoded.len())),
+                        "gzip tail",
+                    );
+                } else {
+                    let byte = b"x";
+                    testing::assert_eq(
+                        testing::expect_ok(socket.read(byte.as_mut_slice()), "closed socket"),
+                        0,
+                    );
+                }
+            },
+            |url| {
+                // Keep the peer read alive until it observes callback cleanup,
+                // before the enclosing task scope cancels unfinished children.
+                defer {
+                    let _ = peer_done.recv();
+                };
+                let client = testing::expect_ok(
+                    Client::builder().timeout(Duration::from_seconds(3)).build(),
+                    "client",
+                );
+                defer client.close();
+                if mode == 2 {
+                    testing::assert(
+                        panic::catch(
+                            || {
+                                let result: Result[(), Error] = client.get(url).send_gzip_stream(
+                                    gzip_limits(),
+                                    |_| panic::raise("callback panic"),
+                                );
+                                let _ = result;
+                            },
+                        ).is_err(),
+                    );
+                } else {
+                    context::with_cancel(
+                        context::Context::background(),
+                        |control, cancel| {
+                            let result = client.get(url).send_gzip_stream_with(
+                                control,
+                                gzip_limits(),
+                                |response| {
+                                    if mode == 1 {
+                                        cancel.cancel();
+                                    }
+                                    let first = b"x";
+                                    let count = response.read_bytes(first.as_mut_slice())?;
+                                    testing::assert_eq(count, 1);
+                                    testing::assert(first == b"h");
+                                    if mode == 3 {
+                                        return Result::Ok(())
+                                    }
+                                    progress.send(());
+                                    let output = io::Cursor::new(Bytes::new());
+                                    testing::assert_eq(response.copy_to(output)?, 10);
+                                    testing::assert(output.bytes().to_vec() == b"ello world");
+                                    Result::Ok(())
+                                },
+                            );
+                            if mode == 1 {
+                                testing::assert_eq(
+                                    testing::expect_err(result, "cancel").kind,
+                                    ErrorKind::Cancelled,
+                                );
+                            } else {
+                                testing::expect_ok(result, "stream");
+                            }
+                        },
+                    );
+                }
+            },
+        );
+    }
 }

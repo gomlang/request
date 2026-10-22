@@ -391,3 +391,20 @@ goml test
 ```
 
 `goml test` builds the example and runs its tests. `(cd ../workflows && just ecosystem-test request)` also retains the library-specific smoke and compatibility checks.
+
+`RequestBuilder.send_gzip_stream(limits, consume)` and
+`send_gzip_stream_with(context, limits, consume)` explicitly request gzip and
+provide a callback-scoped `GzipResponse` implementing `io::Read`, `read_bytes`
+and `copy_to`. `compress::Limits` separately bounds compressed input, decoded
+output, DEFLATE blocks and work; the client's raw response body limit also applies.
+The response must contain exactly one gzip content encoding; identity responses
+and coding chains are rejected. Raw `send_stream` behavior is unchanged.
+
+Decoded `headers()` omits Content-Encoding and Content-Length;
+`encoded_headers()` preserves wire metadata. Reading to EOF validates gzip
+checksums, size trailers and concatenated members. Early return closes without
+draining or verifying unread bytes. Decode errors remain sticky even if a callback
+ignores them; cancellation, panic and return close the underlying HTTP/1.1 stream.
+Retained handles cannot read after callback exit. Finish child readers before
+returning, as with raw streaming callbacks. Local TCP tests cover fragmented
+input, a gated tail, truncation, checksum, output limits, cancellation and panic.
