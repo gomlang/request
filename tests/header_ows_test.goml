@@ -1,0 +1,39 @@
+package tests;
+
+use ecosystem::request::{Client};
+use std::testing;
+
+#[test]
+fn response_headers_preserve_non_ascii_whitespace_in_buffered_and_streaming_reads() -> () {
+    for streaming in[false, true] {
+        for value in["\u00a0opaque\u00a0", "\u2003opaque\u2003", "\u00a0", "normal"] {
+            wire_response(
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\nX-Opaque: \t" + value
+                    + "\t \r\n\r\n",
+                |url| {
+                    let client = testing::expect_ok(Client::new(), "client");
+                    defer client.close();
+                    if streaming {
+                        testing::assert_ok(
+                            client.get(url).send_stream(
+                                |response| {
+                                    testing::assert_eq(
+                                        response.headers().get("x-opaque").unwrap_or("missing"),
+                                        value,
+                                    );
+                                    Result::Ok(())
+                                },
+                            ),
+                        );
+                    } else {
+                        let response = testing::expect_ok(client.get(url).send(), "response");
+                        testing::assert_eq(
+                            response.headers().get("x-opaque").unwrap_or("missing"),
+                            value,
+                        );
+                    }
+                },
+            );
+        }
+    }
+}
