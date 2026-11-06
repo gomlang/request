@@ -162,7 +162,11 @@ explicitly requested content encodings as raw bytes; they do not invoke the
 buffered gzip decoder. Response limits count the streamed representation bytes.
 Content-Length, chunked framing, EOF framing, trailers, malformed-message
 errors, cookies, proxies and redirect security policies are supported. Buffered
-and streaming HTTP/1.1 responses validate chunk extension names, optional token
+and streaming responses and CONNECT tunnels validate HTTP/1 status lines under
+[RFC 9112 section 4](https://www.rfc-editor.org/rfc/rfc9112.html#section-4),
+rejecting invalid reason-phrase controls while accepting empty reasons, tabs
+and non-ASCII bytes. Buffered and streaming HTTP/1.1 responses validate chunk
+extension names, optional token
 or quoted values, escapes and separators under
 [RFC 9112 section 7.1.1](https://www.rfc-editor.org/rfc/rfc9112.html#section-7.1.1).
 Valid unknown extensions are ignored; malformed ones fail with a Transport

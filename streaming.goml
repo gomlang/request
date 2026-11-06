@@ -357,16 +357,9 @@ fn streaming_response(
     let mut headers = Headers::new();
     loop {
         let line = reader.line(budget)?;
-        let parts = line.split(" ");
-        if parts.len() < 2 || (parts[0] != "HTTP/1.1" && parts[0] != "HTTP/1.0")
-            || parts[1].byte_len() != 3 {
-            return Result::Err(transport_error("invalid HTTP status line"))
-        }
-        version = parts[0];
-        status = decimal(parts[1])?;
-        if status < 100 || status > 599 {
-            return Result::Err(transport_error("invalid HTTP status"))
-        }
+        let parsed = http1_status_line(line)?;
+        version = parsed.0;
+        status = parsed.1;
         headers = read_headers(reader, budget)?;
         if status >= 200 || status == 101 {
             break

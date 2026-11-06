@@ -1,0 +1,22 @@
+package request;
+
+fn http1_status_line(line: string) -> Result[(string, isize), Error] {
+    if line.byte_len() < 13 || line.byte_get(8) != b' ' || line.byte_get(12) != b' ' {
+        return Result::Err(transport_error("invalid HTTP status line"))
+    }
+    let version = line.byte_slice(0, 8);
+    if version != "HTTP/1.1" && version != "HTTP/1.0" {
+        return Result::Err(transport_error("invalid HTTP status line"))
+    }
+    let status = decimal(line.byte_slice(9, 12))?;
+    if status < 100 || status > 599 {
+        return Result::Err(transport_error("invalid HTTP status"))
+    }
+    for index in 13..line.byte_len() {
+        let byte = line.byte_get(index);
+        if byte == 127 || byte < 32 && byte != 9 {
+            return Result::Err(transport_error("invalid HTTP reason phrase"))
+        }
+    }
+    Result::Ok((version, status))
+}

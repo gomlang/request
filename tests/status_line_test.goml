@@ -1,0 +1,82 @@
+package tests;
+
+use ecosystem::request::{Client, ErrorKind};
+use std::testing;
+
+#[test]
+fn malformed_status_reason_controls_are_rejected_in_both_response_modes() -> () {
+    for line in["HTTP/1.1 200 OK\u0001bad", "HTTP/1.1 200 OK\u007fbad", "HTTP/1.1 200"] {
+        for streaming in[false, true] {
+            wire_response(
+                line + "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                |url| {
+                    let client = testing::expect_ok(Client::new(), "client");
+                    defer client.close();
+                    let error = if streaming {
+                        testing::expect_err(
+                            client.get(url).send_stream(|_| Result::Ok(())),
+                            "malformed status",
+                        )
+                    } else {
+                        testing::expect_err(client.get(url).send(), "malformed status")
+                    };
+                    testing::assert_eq(error.kind, ErrorKind::Transport);
+                },
+            );
+        }
+    }
+}
+
+#[test]
+fn valid_empty_tab_and_non_ascii_status_reasons_work_in_both_response_modes() -> () {
+    for line in["HTTP/1.1 200 ", "HTTP/1.0 200 \tOK", "HTTP/1.1 200 Résultat"] {
+        for streaming in[false, true] {
+            wire_response(
+                line + "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                |url| {
+                    let client = testing::expect_ok(Client::new(), "client");
+                    defer client.close();
+                    if streaming {
+                        testing::expect_ok(
+                            client.get(url).send_stream(|_| Result::Ok(())),
+                            "valid status",
+                        );
+                    } else {
+                        let _ = testing::expect_ok(client.get(url).send(), "valid status");
+                    }
+                },
+            );
+        }
+    }
+}
+
+#[test]
+fn connect_rejects_reason_controls_before_starting_tls() -> () {
+    for line in["HTTP/1.1 200 OK\u0001bad", "HTTP/1.1 200 OK\u007fbad"] {
+        for streaming in[false, true] {
+            wire_response(
+                line + "\r\n\r\n",
+                |proxy| {
+                    let client = testing::expect_ok(
+                        Client::builder().proxy(proxy).build(),
+                        "proxy client",
+                    );
+                    defer client.close();
+                    let error = if streaming {
+                        testing::expect_err(
+                            client.get("https://example.invalid/").send_stream(|_| Result::Ok(())),
+                            "invalid CONNECT status",
+                        )
+                    } else {
+                        testing::expect_err(
+                            client.get("https://example.invalid/").send(),
+                            "invalid CONNECT status",
+                        )
+                    };
+                    testing::assert_eq(error.kind, ErrorKind::Transport);
+                    testing::assert(error.message.contains("proxy CONNECT failed"));
+                },
+            );
+        }
+    }
+}
