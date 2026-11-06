@@ -843,3 +843,46 @@ fn gzip_stream_delivers_before_tail_and_closes_on_cancel_or_panic() -> () {
         );
     }
 }
+
+#[test]
+fn gzip_stream_preserves_wire_body_limit_inside_callback() -> () {
+    let encoded = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff\xcb\x48\xcd\xc9\xc9\x57\x28\xcf\x2f\xca\x49\x01\x00\x85\x11\x4a\x0d\x0b\x00\x00\x00";
+    streaming_peer(
+        |socket| {
+            let _ = streaming_head(socket);
+            testing::expect_ok(
+                socket.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nConnection: close\r\n\r\n".as_slice(),
+                ),
+                "headers",
+            );
+            let _ = socket.write_all(encoded.as_slice());
+        },
+        |url| {
+            let client = testing::expect_ok(Client::new(), "client");
+            defer client.close();
+            let result = client.get(url).body_limit(20).send_gzip_stream(
+                gzip_limits(),
+                |response| {
+                    let output = io::Cursor::new(Bytes::new());
+                    let error = testing::expect_err(response.copy_to(output), "encoded body limit");
+                    testing::assert_eq(error.kind, ErrorKind::BodyLimit);
+                    testing::assert_eq(error.message, "response body exceeds limit");
+                    let buffer = b"x";
+                    testing::assert_eq(
+                        testing::expect_err(
+                            response.read_bytes(buffer.as_mut_slice()),
+                            "latched read limit",
+                        ).kind,
+                        ErrorKind::BodyLimit,
+                    );
+                    Result::Ok(())
+                },
+            );
+            testing::assert_eq(
+                testing::expect_err(result, "latched body limit").kind,
+                ErrorKind::BodyLimit,
+            );
+        },
+    );
+}

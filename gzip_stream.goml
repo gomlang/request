@@ -50,7 +50,9 @@ impl GzipResponse {
             return Result::Err(Error::new(ErrorKind::Closed, "response is closed"))
         }
         self.response.reader.context.check().map_err(context_error)?;
-        self.decoder.read_chunk(output).map_err(gzip_stream_error)
+        self.decoder.read_chunk(output).map_err(
+            |error| self.response.failure().unwrap_or_else(|| gzip_stream_error(error)),
+        )
     }
 
     pub fn copy_to[W: Write](self: GzipResponse, writer: W) -> Result[u64, Error] {
